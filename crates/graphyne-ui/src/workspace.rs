@@ -1036,23 +1036,23 @@ impl Workspace {
             .gap(px(2.))
             .when(cfg!(target_os = "macos"), |d| d.pl(px(72.)))
             .child(
-                icon_button("toggle-left", if self.left { Icon::PanelLeftOn } else { Icon::PanelLeft }, if self.left { color(c::TEXT) } else { tint })
+                title_button("toggle-left", if self.left { Icon::PanelLeftOn } else { Icon::PanelLeft }, if self.left { color(c::TEXT) } else { tint })
                     .tooltip(tooltip("Left Panel", Some("Ctrl+1")))
                     .on_click(cx.listener(|this, _, w, cx| this.toggle_left(&ToggleLeftDock, w, cx))),
             )
             .child(
-                icon_button("toggle-bottom", if self.bottom && self.detached.is_none() { Icon::PanelBottomOn } else { Icon::PanelBottom }, if self.bottom { color(c::TEXT) } else { tint })
+                title_button("toggle-bottom", if self.bottom && self.detached.is_none() { Icon::PanelBottomOn } else { Icon::PanelBottom }, if self.bottom { color(c::TEXT) } else { tint })
                     .tooltip(tooltip("Bottom Panel", Some("Ctrl+J")))
                     .on_click(cx.listener(|this, _, w, cx| this.toggle_bottom(&ToggleBottomDock, w, cx))),
             )
             .child(
-                icon_button("toggle-right", if self.right { Icon::PanelRightOn } else { Icon::PanelRight }, if self.right { color(c::TEXT) } else { tint })
+                title_button("toggle-right", if self.right { Icon::PanelRightOn } else { Icon::PanelRight }, if self.right { color(c::TEXT) } else { tint })
                     .tooltip(tooltip("Right Panel", Some("Ctrl+Alt+B")))
                     .on_click(cx.listener(|this, _, w, cx| this.toggle_right(&ToggleRightDock, w, cx))),
             )
             .child(vsep())
             .child(
-                icon_button("workspaces", Icon::Grid, if self.menu == Some(Menu::Projects) { color(c::TEXT) } else { tint })
+                title_button("workspaces", Icon::Grid, if self.menu == Some(Menu::Projects) { color(c::TEXT) } else { tint })
                     .tooltip(tooltip("Projects", None))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Projects, cx))),
             );
@@ -1110,10 +1110,10 @@ impl Workspace {
             .justify_end()
             .gap(px(2.))
             .child(
-                icon_button("smart-mode", Icon::Bolt, bolt_color).tooltip(tooltip(bolt_tip, None)),
+                title_button("smart-mode", Icon::Bolt, bolt_color).tooltip(tooltip(bolt_tip, None)),
             )
             .child(
-                icon_button("run", Icon::Play, color(c::TEXT))
+                title_button("run", Icon::Play, color(c::TEXT))
                     .tooltip(tooltip("Run", Some("Shift+F10")))
                     .on_click(cx.listener(|this, _, w, cx| this.run_active(w, cx))),
             )
@@ -1137,12 +1137,12 @@ impl Workspace {
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Run, cx))),
             )
             .child(
-                icon_button("debug", Icon::Bug, if self.debugger.read(cx).is_live() { color(c::GREEN) } else { color(c::TEXT) })
+                title_button("debug", Icon::Bug, if self.debugger.read(cx).is_live() { color(c::GREEN) } else { color(c::TEXT) })
                     .tooltip(tooltip("Debug", Some("Shift+F9")))
                     .on_click(cx.listener(|this, _, w, cx| this.debug_active(&DebugActive, w, cx))),
             )
             .child(
-                icon_button("search", Icon::Search, tint)
+                title_button("search", Icon::Search, tint)
                     .tooltip(tooltip("Search Everywhere", Some("Double Shift / Ctrl+K")))
                     .on_click(cx.listener(|this, _, w, cx| this.toggle_search(w, cx))),
             )
@@ -1150,7 +1150,7 @@ impl Workspace {
                 div()
                     .relative()
                     .child(
-                        icon_button("bell", Icon::Bell, tint).tooltip(tooltip("Notifications", None)).on_click(cx.listener(|this, _, _, cx| {
+                        title_button("bell", Icon::Bell, tint).tooltip(tooltip("Notifications", None)).on_click(cx.listener(|this, _, _, cx| {
                             this.show_notifications = !this.show_notifications;
                             this.unread = false;
                             cx.notify();
@@ -1159,7 +1159,7 @@ impl Workspace {
                     .when(self.unread, |d| d.child(div().absolute().top(px(6.)).right(px(6.)).size(px(6.)).rounded_full().bg(color(c::ACCENT)))),
             )
             .child(
-                icon_button("settings", Icon::Settings, if self.menu == Some(Menu::App) { color(c::TEXT) } else { tint })
+                title_button("settings", Icon::Settings, if self.menu == Some(Menu::App) { color(c::TEXT) } else { tint })
                     .tooltip(tooltip("Main Menu", None))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::App, cx))),
             )
@@ -1167,6 +1167,9 @@ impl Workspace {
 
         div()
             .id("title-bar")
+            // Keep presses on the bar away from the focusable root below: its focus-on-click
+            // marks the press as handled, and then Windows never starts dragging the window.
+            .occlude()
             .flex()
             .flex_none()
             .items_center()
@@ -1782,6 +1785,12 @@ impl Workspace {
     }
 }
 
+/// A title-bar button. It blocks the drag area under it, so pressing it is a click, not the
+/// start of moving the window.
+fn title_button(id: impl Into<gpui::ElementId>, ic: Icon, tint: gpui::Hsla) -> gpui::Stateful<gpui::Div> {
+    icon_button(id, ic, tint).occlude()
+}
+
 /// Windows / Linux caption buttons (client-side decorations).
 pub fn caption_buttons<V: 'static>(maximized: bool, _cx: &mut Context<V>) -> impl IntoElement + use<V> {
     let button = |id: &'static str, ic: Icon, area: WindowControlArea, close: bool| {
@@ -1828,6 +1837,7 @@ pub fn caption_bar<V: 'static>(title: SharedString, maximized: bool, cx: &mut Co
         .items_center()
         .h(px(theme::TITLE_BAR_HEIGHT))
         .pl(px(if cfg!(target_os = "macos") { 80. } else { 14. }))
+        .occlude()
         .window_control_area(WindowControlArea::Drag)
         .child(icon(Icon::Terminal, 14., color(c::TEXT_MUTED)))
         .child(div().ml(px(8.)).text_size(px(theme::UI_TEXT)).text_color(color(c::TEXT_MUTED)).child(title))

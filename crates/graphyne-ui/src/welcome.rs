@@ -205,6 +205,8 @@ impl Render for Welcome {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let title_bar = div()
             .id("welcome-title")
+            // Presses must not reach the focusable root, or the window can't be dragged.
+            .occlude()
             .flex()
             .flex_none()
             .items_center()
