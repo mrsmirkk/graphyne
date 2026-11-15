@@ -119,6 +119,9 @@ pub struct Editor {
     scroll_x: Pixels,
     autoscroll: bool,
     center_on_cursor: bool,
+    /// Session restore: the buffer line to keep at the top until the user scrolls, types
+    /// or moves the cursor. `N usages` rows appear later and would push the text down.
+    restore_top: Option<f32>,
     tree: Option<Tree>,
     reparse_task: Option<Task<()>>,
     analysis_task: Option<Task<()>>,
@@ -179,6 +182,7 @@ impl Editor {
             scroll_x: px(0.),
             autoscroll: false,
             center_on_cursor: false,
+            restore_top: None,
             tree: None,
             reparse_task: None,
             analysis_task: None,
@@ -271,11 +275,19 @@ impl Editor {
     pub fn restore_view(&mut self, cursor: (usize, usize), anchor: (usize, usize), top_line: f32, scroll_x: f32, cx: &mut Context<Self>) {
         self.sel = Selection { anchor: self.buffer.char_at(anchor.0, anchor.1), head: self.buffer.char_at(cursor.0, cursor.1) };
         self.goal_col = None;
-        self.scroll_y = px(top_line.max(0.) * theme::code_line_height());
+        self.restore_top = Some(top_line.max(0.));
+        self.apply_restore_top();
         self.scroll_x = px(scroll_x.max(0.));
         self.autoscroll = false;
         self.center_on_cursor = false;
         cx.notify();
+    }
+
+    fn apply_restore_top(&mut self) {
+        if let Some(top) = self.restore_top {
+            let display = self.display_row(top.floor() as usize) as f32 + top.fract();
+            self.scroll_y = px(display * theme::code_line_height());
+        }
     }
 
     pub fn go_to(&mut self, row: usize, col: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1475,6 +1487,7 @@ impl Editor {
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.restore_top = None;
         window.focus(&self.focus_handle);
         self.completion = None;
         self.lsp.hover = None;
@@ -1572,6 +1585,7 @@ impl Editor {
         let lh = px(theme::code_line_height());
         let delta = event.delta.pixel_delta(lh);
         let (dx, dy) = if event.modifiers.shift && delta.x == px(0.) { (delta.y, px(0.)) } else { (delta.x, delta.y) };
+        self.restore_top = None;
         self.scroll_y = (self.scroll_y - dy).max(px(0.));
         self.scroll_x = (self.scroll_x - dx).max(px(0.));
         self.clamp_scroll();
@@ -1632,6 +1646,7 @@ impl Editor {
 
     fn rebuild_lenses(&mut self) {
         self.lenses = Arc::new(build_lenses(&self.outline, &self.ident_counts, &self.lsp.usages));
+        self.apply_restore_top();
     }
 
     fn display_row(&self, row: usize) -> usize {
@@ -1915,6 +1930,7 @@ fn editor_element(editor: Entity<Editor>) -> impl IntoElement {
                 let digits = (e.buffer.len_lines().max(1) as f32).log10().floor() as usize + 1;
                 let gutter = px(18.) + char_width * digits.max(3) as f32 + px(22.);
                 if e.autoscroll || e.center_on_cursor {
+                    e.restore_top = None;
                     let (row, col) = e.buffer.row_col(e.sel.head);
                     let drow = e.display_row(row) as f32;
                     let top = line_height * drow;
