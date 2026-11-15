@@ -17,6 +17,8 @@ use std::time::Duration;
 
 pub enum PanelEvent {
     OpenFileAt(PathBuf, usize, usize),
+    /// Show the side-by-side diff of a changed file.
+    OpenDiff(PathBuf),
     GitChanged(HashMap<String, ChangeKind>, Option<String>),
 }
 
@@ -364,7 +366,7 @@ impl Render for GitPanel {
                     .rounded(px(5.))
                     .hover(|s| s.bg(color(c::HOVER)))
                     .cursor_pointer()
-                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(PanelEvent::OpenFileAt(path.clone(), 0, 0))))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(PanelEvent::OpenDiff(path.clone()))))
                     .child(
                         div()
                             .id(("check", ix))

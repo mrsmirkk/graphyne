@@ -2,6 +2,7 @@
 
 use crate::assets::Icon;
 use crate::components::{icon, island, island_header, kbd, tooltip};
+use crate::diff_view::{DiffEvent, DiffView};
 use crate::editor::{Editor, EditorEvent};
 use crate::hex_view::HexView;
 use crate::theme::{self, c, color, color_a};
@@ -14,6 +15,8 @@ use std::path::{Path, PathBuf};
 pub enum PaneItem {
     Editor(Entity<Editor>),
     Hex(Entity<HexView>),
+    /// Side-by-side comparison with HEAD (opened from the Git tab).
+    Diff(Entity<DiffView>),
 }
 
 impl PaneItem {
@@ -21,12 +24,15 @@ impl PaneItem {
         match self {
             PaneItem::Editor(e) => e.read(cx).path.clone(),
             PaneItem::Hex(h) => Some(h.read(cx).path.clone()),
+            // A diff tab never stands in for the file itself.
+            PaneItem::Diff(_) => None,
         }
     }
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         match self {
             PaneItem::Editor(e) => e.focus_handle(cx),
             PaneItem::Hex(h) => h.focus_handle(cx),
+            PaneItem::Diff(d) => d.focus_handle(cx),
         }
     }
 }
@@ -94,6 +100,39 @@ impl EditorPane {
             Some(item) => window.focus(&item.focus_handle(cx)),
             None => window.focus(&self.focus_handle),
         }
+    }
+
+    /// Open (or re-activate and refresh) the side-by-side diff of `path` against HEAD.
+    pub fn open_diff(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let key = dunce_like(&path);
+        let existing = self.items.iter().position(|i| matches!(i, PaneItem::Diff(d) if dunce_like(&d.read(cx).path) == key));
+        match existing {
+            Some(ix) => {
+                self.active = ix;
+                if let PaneItem::Diff(d) = &self.items[ix] {
+                    d.update(cx, |d, cx| d.refresh(cx));
+                }
+            }
+            None => {
+                let view = cx.new(|cx| DiffView::new(path, cx));
+                self.subs.push(cx.subscribe(&view, |_, _, ev, cx| match ev {
+                    DiffEvent::OpenFile(p) => cx.emit(PaneEvent::OpenLocation(p.clone(), 0, 0)),
+                }));
+                let at = (self.active + 1).min(self.items.len());
+                self.items.insert(at, PaneItem::Diff(view));
+                self.active = at;
+            }
+        }
+        self.focus_active(window, cx);
+        cx.emit(PaneEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn diff_views(&self) -> impl Iterator<Item = &Entity<DiffView>> {
+        self.items.iter().filter_map(|i| match i {
+            PaneItem::Diff(d) => Some(d),
+            _ => None,
+        })
     }
 
     /// Open (or activate) a file; `at` = (row, col) to reveal.
@@ -291,7 +330,9 @@ impl Render for EditorPane {
                     (e.title(), e.language, e.is_dirty())
                 }
                 PaneItem::Hex(h) => (h.read(cx).title(), LanguageId::PlainText, false),
+                PaneItem::Diff(d) => (d.read(cx).title().to_string(), LanguageId::PlainText, false),
             };
+            let is_diff = matches!(item, PaneItem::Diff(_));
             header = header.child(
                 div()
                     .id(("tab", ix))
@@ -320,6 +361,9 @@ impl Render for EditorPane {
                     .on_mouse_down(gpui::MouseButton::Middle, cx.listener(move |this, _, window, cx| this.close(ix, window, cx)))
                     .child(crate::file_icons::file_icon(Path::new(&title)))
                     .child(title)
+                    .when(is_diff, |d| {
+                        d.child(div().px(px(4.)).rounded(px(3.)).bg(color_a(c::GIT_MODIFIED, 0.18)).text_size(px(10.5)).text_color(color(c::GIT_MODIFIED)).child("diff"))
+                    })
                     .child(
                         div()
                             .id(("tab-close", ix))
@@ -347,6 +391,7 @@ impl Render for EditorPane {
         let body: gpui::AnyElement = match self.items.get(self.active) {
             Some(PaneItem::Editor(e)) => e.clone().into_any_element(),
             Some(PaneItem::Hex(h)) => h.clone().into_any_element(),
+            Some(PaneItem::Diff(d)) => d.clone().into_any_element(),
             None => empty_state().into_any_element(),
         };
         let problems = self.render_problems(cx);

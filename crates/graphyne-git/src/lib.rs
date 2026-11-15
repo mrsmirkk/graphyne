@@ -281,6 +281,72 @@ pub fn line_diff(base: &str, current: &str) -> Vec<DiffHunk> {
     hunks
 }
 
+/// What a side-by-side row shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SideKind {
+    Same,
+    Modified,
+    Added,
+    Deleted,
+}
+
+/// A changed block, as seen from one of its rows: the connector between the two columns
+/// is drawn from these numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HunkShape {
+    /// Row index inside the block.
+    pub index: u32,
+    /// Lines of the block on the left (old) and right (new) side.
+    pub old_len: u32,
+    pub new_len: u32,
+}
+
+/// One aligned row of a side-by-side diff: a line of `base` (left), of `current` (right),
+/// or both. Inside a changed block the shorter side gets empty filler rows, so one scroll
+/// position always shows matching content on both sides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SideRow {
+    /// 0-based line numbers.
+    pub left: Option<u32>,
+    pub right: Option<u32>,
+    pub kind: SideKind,
+    pub hunk: Option<HunkShape>,
+}
+
+pub fn side_by_side(base: &str, current: &str) -> Vec<SideRow> {
+    let (old_total, new_total) = (base.lines().count() as u32, current.lines().count() as u32);
+    let mut rows = Vec::new();
+    let (mut old, mut new) = (0u32, 0u32);
+    let mut same_until = |rows: &mut Vec<SideRow>, old: &mut u32, new: &mut u32, old_end: u32, new_end: u32| {
+        while *old < old_end && *new < new_end {
+            rows.push(SideRow { left: Some(*old), right: Some(*new), kind: SideKind::Same, hunk: None });
+            *old += 1;
+            *new += 1;
+        }
+    };
+    for h in line_diff(base, current) {
+        same_until(&mut rows, &mut old, &mut new, h.old.start, h.new.start);
+        let (old_len, new_len) = (h.old.end - h.old.start, h.new.end - h.new.start);
+        let kind = match h.kind {
+            LineChange::Added => SideKind::Added,
+            LineChange::Deleted => SideKind::Deleted,
+            LineChange::Modified => SideKind::Modified,
+        };
+        for i in 0..old_len.max(new_len) {
+            rows.push(SideRow {
+                left: (i < old_len).then_some(h.old.start + i),
+                right: (i < new_len).then_some(h.new.start + i),
+                kind,
+                hunk: Some(HunkShape { index: i, old_len, new_len }),
+            });
+        }
+        old = h.old.end;
+        new = h.new.end;
+    }
+    same_until(&mut rows, &mut old, &mut new, old_total, new_total);
+    rows
+}
+
 /// Stage exactly `rel_paths` (adds / removals) and create a commit on HEAD.
 pub fn commit_paths(root: &Path, rel_paths: &[String], message: &str) -> Result<String> {
     if message.trim().is_empty() {
@@ -332,6 +398,30 @@ mod tests {
         assert_eq!(h[1].new, 3..4);
         let h = line_diff("a\nb\n", "a\n");
         assert_eq!(h[0].kind, LineChange::Deleted);
+    }
+
+    #[test]
+    fn side_by_side_alignment() {
+        let rows = side_by_side("a\nb\nc\nd\nold\n", "a\nB\nc\nnew\nd\n");
+        let view: Vec<(Option<u32>, Option<u32>, SideKind)> = rows.iter().map(|r| (r.left, r.right, r.kind)).collect();
+        assert_eq!(
+            view,
+            vec![
+                (Some(0), Some(0), SideKind::Same),
+                (Some(1), Some(1), SideKind::Modified),
+                (Some(2), Some(2), SideKind::Same),
+                (None, Some(3), SideKind::Added),
+                (Some(3), Some(4), SideKind::Same),
+                (Some(4), None, SideKind::Deleted),
+            ]
+        );
+        // A 1-line block replaced by 3 lines: filler rows on the left, shape for the connector.
+        let rows = side_by_side("x\nold\ny\n", "x\nn1\nn2\nn3\ny\n");
+        assert_eq!(rows[1].hunk, Some(HunkShape { index: 0, old_len: 1, new_len: 3 }));
+        assert_eq!((rows[3].left, rows[3].right), (None, Some(3)));
+        assert_eq!((rows[4].left, rows[4].right, rows[4].kind), (Some(2), Some(4), SideKind::Same));
+        // New file: everything added.
+        assert!(side_by_side("", "a\nb\n").iter().all(|r| r.kind == SideKind::Added && r.left.is_none()));
     }
 
     fn commit(id: &str, parents: &[&str]) -> CommitInfo {

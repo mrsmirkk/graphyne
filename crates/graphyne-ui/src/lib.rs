@@ -5,6 +5,7 @@ mod assets;
 mod components;
 mod debug_panel;
 mod debugger;
+mod diff_view;
 mod editor;
 mod editor_pane;
 mod file_icons;

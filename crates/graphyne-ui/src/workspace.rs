@@ -141,6 +141,10 @@ impl Workspace {
         }));
         let panel_handler = |this: &mut Self, ev: &PanelEvent, window: &mut Window, cx: &mut Context<Self>| match ev {
             PanelEvent::OpenFileAt(path, line, col) => this.open_file(path.clone(), Some((*line, *col)), window, cx),
+            PanelEvent::OpenDiff(path) => {
+                let path = path.clone();
+                this.pane.update(cx, |p, cx| p.open_diff(path, window, cx));
+            }
             PanelEvent::GitChanged(map, branch) => {
                 this.branch = branch.clone().map(SharedString::from);
                 let map = map.clone();
@@ -369,6 +373,13 @@ impl Workspace {
     fn on_fs_change(&mut self, files: Vec<PathBuf>, git_only: bool, cx: &mut Context<Self>) {
         if let (Some(server), false) = (&self.live_server, files.is_empty()) {
             server.reload();
+        }
+        // Open diffs follow saves, external edits and commits (HEAD moves).
+        let diffs: Vec<_> = self.pane.read(cx).diff_views().cloned().collect();
+        for d in diffs {
+            if git_only || files.contains(&d.read(cx).path) {
+                d.update(cx, |d, cx| d.refresh(cx));
+            }
         }
         if !files.is_empty() {
             self.file_tree.update(cx, |t, cx| t.refresh(cx));
@@ -1225,6 +1236,15 @@ impl Workspace {
                 let lang = e.language;
                 let toolchain = self.toolchains.get(&lang).cloned().flatten();
                 right.push(div().child(toolchain.unwrap_or_else(|| lang.name().into())).into_any_element());
+            }
+            Some(PaneItem::Diff(d)) => {
+                let d = d.read(cx);
+                if let Ok(rel) = d.path.strip_prefix(&self.root) {
+                    for comp in rel.components() {
+                        crumbs.push(comp.as_os_str().to_string_lossy().to_string().into());
+                    }
+                }
+                right.push(div().child("Diff with HEAD").into_any_element());
             }
             Some(PaneItem::Hex(h)) => {
                 let h = h.read(cx);
