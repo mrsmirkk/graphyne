@@ -23,6 +23,8 @@ use std::sync::{Arc, Mutex};
 const ROW_H: f32 = 22.;
 const GUTTER_W: f32 = 30.;
 const NUMBER_W: f32 = 44.;
+/// Column at the start of the right side that holds the "include in commit" checkboxes.
+const CHECK_W: f32 = 24.;
 
 /// Changed blocks left out of the next commit, per file (by block signature). Shared by
 /// the diff views (checkboxes) and the Git tab (commit).
@@ -328,10 +330,12 @@ struct Cell<'a> {
     is_left: bool,
     excluded: bool,
     scroll_x: f32,
+    /// Right side only: the checkbox column (with a checkbox on a block's first row).
+    check: Option<Option<gpui::AnyElement>>,
 }
 
 fn line_cell(cell: Cell<'_>) -> impl IntoElement {
-    let Cell { side, line, kind, words, is_left, excluded, scroll_x } = cell;
+    let Cell { side, line, kind, words, is_left, excluded, scroll_x, check } = cell;
     let changed = kind != SideKind::Same;
     // A block left out of the commit is drawn grey.
     let tint = if excluded { c::TEXT_FAINT } else { kind_color(kind) };
@@ -352,6 +356,7 @@ fn line_cell(cell: Cell<'_>) -> impl IntoElement {
         .items_center()
         .when_some(bg, |d, bg| d.bg(bg))
         .when(changed && line.is_some() && is_left, |d| d.child(div().w(px(3.)).h_full().bg(color(tint))))
+        .when_some(check, |d, checkbox| d.child(div().flex_none().w(px(CHECK_W)).h_full().flex().items_center().justify_center().children(checkbox)))
         .child(div().flex_none().w(px(NUMBER_W)).pr(px(10.)).text_right().text_color(color(c::TEXT_FAINT)).child(number))
         .child(
             div()
@@ -372,7 +377,7 @@ impl Render for DiffView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let font_id = window.text_system().resolve_font(&gpui::font(theme::fonts().code));
         self.char_w = window.text_system().advance(font_id, px(theme::CODE_SIZE), 'm').map(|s| f32::from(s.width)).unwrap_or(8.);
-        let header_label = |t: &'static str| div().flex_1().pl(px(NUMBER_W)).text_color(color(c::TEXT_DIM)).child(t);
+        let header_label = |t: &'static str, indent: f32| div().flex_1().pl(px(indent)).text_color(color(c::TEXT_DIM)).child(t);
         let (added, removed) = self.data.as_ref().map(|d| (d.added, d.removed)).unwrap_or_default();
         let excluded = self.excluded_set();
         let total_blocks = self.data.as_ref().map(|d| d.hunk_sigs.len()).unwrap_or(0);
@@ -388,9 +393,9 @@ impl Render for DiffView {
             .border_b_1()
             .border_color(color(c::BORDER))
             .text_size(px(theme::UI_SMALL))
-            .child(header_label("HEAD"))
+            .child(header_label("HEAD", NUMBER_W))
             .child(div().w(px(GUTTER_W)))
-            .child(header_label("Working tree"))
+            .child(header_label("Working tree", NUMBER_W + CHECK_W))
             .when(skipped > 0, |d| d.child(div().text_color(color(c::TEXT_DIM)).child(format!("{} of {total_blocks} changes in commit", total_blocks - skipped))))
             .child(div().text_color(color(c::GIT_ADDED)).child(format!("+{added}")))
             .child(div().text_color(color(c::RED)).child(format!("−{removed}")))
@@ -422,13 +427,11 @@ impl Render for DiffView {
                                 Some((l, r)) => (l, r),
                                 None => (&[], &[]),
                             };
-                            // Checkbox on the first row of each block: include it in the next commit.
+                            // Checkbox on the first row of each block: include it in the next
+                            // commit. Same look as the Git tab's file checkboxes.
                             let checkbox = (row.hunk.is_some_and(|h| h.index == 0)).then_some(sig).flatten().map(|sig| {
                                 div()
                                     .id(("hunk-check", ix))
-                                    .absolute()
-                                    .top(px(4.))
-                                    .left(px((GUTTER_W - 14.) / 2.))
                                     .size(px(14.))
                                     .flex()
                                     .items_center()
@@ -437,26 +440,34 @@ impl Render for DiffView {
                                     .border_1()
                                     .cursor_pointer()
                                     .when(!is_excluded, |d| d.bg(color(c::ACCENT)).border_color(color(c::ACCENT)).child(icon(Icon::Check, 10., color(0xFFFFFF))))
-                                    .when(is_excluded, |d| d.bg(color(c::ISLAND)).border_color(color(c::TEXT_DIM)))
+                                    .when(is_excluded, |d| d.border_color(color(c::TEXT_FAINT)).hover(|s| s.border_color(color(c::TEXT_MUTED))))
                                     .tooltip(tooltip(if is_excluded { "Not in the next commit — click to include" } else { "In the next commit — click to leave out" }, None))
                                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_hunk(sig, cx)))
+                                    .into_any_element()
                             });
                             div()
                                 .id(ix)
                                 .flex()
                                 .w_full()
                                 .h(px(ROW_H))
-                                .child(line_cell(Cell { side: &data.left, line: row.left, kind: row.kind, words: wl, is_left: true, excluded: is_excluded, scroll_x }))
+                                .child(line_cell(Cell { side: &data.left, line: row.left, kind: row.kind, words: wl, is_left: true, excluded: is_excluded, scroll_x, check: None }))
                                 .child(
                                     div()
-                                        .relative()
                                         .flex_none()
                                         .w(px(GUTTER_W))
                                         .h_full()
-                                        .child(canvas(|_, _, _| (), move |bounds, _, window, _| paint_connector(&row, fill, bounds, window)).size_full())
-                                        .children(checkbox),
+                                        .child(canvas(|_, _, _| (), move |bounds, _, window, _| paint_connector(&row, fill, bounds, window)).size_full()),
                                 )
-                                .child(line_cell(Cell { side: &data.right, line: row.right, kind: row.kind, words: wr, is_left: false, excluded: is_excluded, scroll_x }))
+                                .child(line_cell(Cell {
+                                    side: &data.right,
+                                    line: row.right,
+                                    kind: row.kind,
+                                    words: wr,
+                                    is_left: false,
+                                    excluded: is_excluded,
+                                    scroll_x,
+                                    check: Some(checkbox),
+                                }))
                         })
                         .collect()
                 }))
