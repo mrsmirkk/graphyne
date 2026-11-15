@@ -10,6 +10,7 @@ use crate::theme::{self, c, color, color_a};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Task, Window, div, px};
 use graphyne_core::LanguageId;
+use graphyne_core::session::{TabKind, TabState};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
@@ -120,12 +121,7 @@ impl EditorPane {
                 }
             }
             None => {
-                let excluded = self.hunk_excluded.clone();
-                let view = cx.new(|cx| DiffView::new(path, excluded, cx));
-                self.subs.push(cx.subscribe(&view, |_, _, ev, cx| match ev {
-                    DiffEvent::OpenFile(p) => cx.emit(PaneEvent::OpenLocation(p.clone(), 0, 0)),
-                    DiffEvent::SelectionChanged => cx.emit(PaneEvent::Changed),
-                }));
+                let view = self.new_diff_view(path, cx);
                 let at = (self.active + 1).min(self.items.len());
                 self.items.insert(at, PaneItem::Diff(view));
                 self.active = at;
@@ -173,36 +169,13 @@ impl EditorPane {
             cx.notify();
             return;
         }
-        let root = self.root.clone();
-        let store = self.lsp_store.clone();
-        let debugger = self.debugger.clone();
         cx.spawn_in(window, async move |this, cx| {
             let p = path.clone();
-            let loaded = cx
-                .background_spawn(async move {
-                    if graphyne_core::fs_util::is_probably_binary(&p) {
-                        Ok(None)
-                    } else {
-                        // Stream the file straight into a rope, off the UI thread: a 1 GB file
-                        // takes seconds and must not be held twice in memory.
-                        std::fs::File::open(&p)
-                            .and_then(|f| graphyne_core::Buffer::from_reader(std::io::BufReader::with_capacity(1 << 20, f)))
-                            .map(Some)
-                            .map_err(anyhow::Error::from)
-                    }
-                })
-                .await;
+            let loaded = cx.background_spawn(async move { load_file(&p) }).await;
             this.update_in(cx, |this, window, cx| {
                 match loaded {
                     Ok(Some(buffer)) => {
-                        let editor = cx.new(|cx| Editor::new(Some(path.clone()), buffer, root, Some(store), debugger, cx));
-                        this.subs.push(cx.subscribe(&editor, |_, _, ev, cx| match ev {
-                            EditorEvent::Saved => cx.emit(PaneEvent::Saved),
-                            EditorEvent::Edited => cx.emit(PaneEvent::Changed),
-                            EditorEvent::OpenLocation(p, l, c) => cx.emit(PaneEvent::OpenLocation(p.clone(), *l, *c)),
-                            EditorEvent::ApplyEdits(e) => cx.emit(PaneEvent::ApplyEdits(e.clone())),
-                            EditorEvent::Notify(m) => cx.emit(PaneEvent::Notify(m.clone())),
-                        }));
+                        let editor = this.new_editor(path.clone(), buffer, cx);
                         this.items.insert((this.active + 1).min(this.items.len()), PaneItem::Editor(editor.clone()));
                         this.active = (this.active + 1).min(this.items.len() - 1);
                         if this.items.len() == 1 {
@@ -223,6 +196,94 @@ impl EditorPane {
                         window.focus(&hex.focus_handle(cx));
                     }
                     Err(err) => this.error = Some(format!("{err:#}")),
+                }
+                cx.emit(PaneEvent::Changed);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn new_editor(&mut self, path: PathBuf, buffer: graphyne_core::Buffer, cx: &mut Context<Self>) -> Entity<Editor> {
+        let (root, store, debugger) = (self.root.clone(), self.lsp_store.clone(), self.debugger.clone());
+        let editor = cx.new(|cx| Editor::new(Some(path), buffer, root, Some(store), debugger, cx));
+        self.subs.push(cx.subscribe(&editor, |_, _, ev, cx| match ev {
+            EditorEvent::Saved => cx.emit(PaneEvent::Saved),
+            EditorEvent::Edited => cx.emit(PaneEvent::Changed),
+            EditorEvent::OpenLocation(p, l, c) => cx.emit(PaneEvent::OpenLocation(p.clone(), *l, *c)),
+            EditorEvent::ApplyEdits(e) => cx.emit(PaneEvent::ApplyEdits(e.clone())),
+            EditorEvent::Notify(m) => cx.emit(PaneEvent::Notify(m.clone())),
+        }));
+        editor
+    }
+
+    fn new_diff_view(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Entity<DiffView> {
+        let excluded = self.hunk_excluded.clone();
+        let view = cx.new(|cx| DiffView::new(path, excluded, cx));
+        self.subs.push(cx.subscribe(&view, |_, _, ev, cx| match ev {
+            DiffEvent::OpenFile(p) => cx.emit(PaneEvent::OpenLocation(p.clone(), 0, 0)),
+            DiffEvent::SelectionChanged => cx.emit(PaneEvent::Changed),
+        }));
+        view
+    }
+
+    /// Open tabs for the session: each with its cursor and scroll, plus the active index.
+    pub fn tab_states(&self, cx: &App) -> (Vec<TabState>, usize) {
+        let tabs = self
+            .items
+            .iter()
+            .map(|item| match item {
+                PaneItem::Editor(e) => {
+                    let e = e.read(cx);
+                    let (cursor, anchor, scroll_line, scroll_x) = e.view_state();
+                    TabState { kind: TabKind::File, path: e.path.clone(), cursor, anchor, scroll_line, scroll_x }
+                }
+                PaneItem::Hex(h) => TabState { kind: TabKind::File, path: Some(h.read(cx).path.clone()), ..Default::default() },
+                PaneItem::Diff(d) => TabState { kind: TabKind::Diff, path: Some(d.read(cx).path.clone()), ..Default::default() },
+                PaneItem::Plugins(_) => TabState { kind: TabKind::Plugins, ..Default::default() },
+            })
+            .collect();
+        (tabs, self.active)
+    }
+
+    /// Reopen the tabs of the last session in their order, with cursors and scroll
+    /// positions. Files are read off the UI thread; ones that are gone are skipped.
+    pub fn restore(&mut self, tabs: Vec<TabState>, active: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if tabs.is_empty() {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let paths: Vec<Option<PathBuf>> = tabs.iter().map(|t| t.path.clone().filter(|_| t.kind == TabKind::File)).collect();
+            let loaded: Vec<Option<anyhow::Result<Option<graphyne_core::Buffer>>>> =
+                cx.background_spawn(async move { paths.into_iter().map(|p| p.filter(|p| p.is_file()).map(|p| load_file(&p))).collect() }).await;
+            this.update_in(cx, |this, window, cx| {
+                let mut restored = Vec::new();
+                let mut new_active = 0;
+                for (ix, (tab, file)) in tabs.into_iter().zip(loaded).enumerate() {
+                    let item = match (tab.kind, tab.path, file) {
+                        (TabKind::File, Some(path), Some(Ok(Some(buffer)))) => {
+                            let editor = this.new_editor(path, buffer, cx);
+                            editor.update(cx, |e, cx| e.restore_view(tab.cursor, tab.anchor, tab.scroll_line, tab.scroll_x, cx));
+                            PaneItem::Editor(editor)
+                        }
+                        (TabKind::File, Some(path), Some(Ok(None))) => PaneItem::Hex(cx.new(|cx| HexView::new(path, cx))),
+                        (TabKind::Diff, Some(path), _) if path.is_file() => PaneItem::Diff(this.new_diff_view(path, cx)),
+                        (TabKind::Plugins, _, _) => PaneItem::Plugins(cx.new(PluginsPage::new)),
+                        _ => continue,
+                    };
+                    if ix <= active {
+                        new_active = restored.len();
+                    }
+                    restored.push(item);
+                }
+                // Anything opened meanwhile (e.g. from the command line) stays after them.
+                let opened_meanwhile = !this.items.is_empty();
+                restored.append(&mut this.items);
+                this.items = restored;
+                if !opened_meanwhile {
+                    this.active = new_active.min(this.items.len().saturating_sub(1));
+                    this.focus_active(window, cx);
                 }
                 cx.emit(PaneEvent::Changed);
                 cx.notify();
@@ -430,4 +491,14 @@ impl Render for EditorPane {
             .child(header)
             .child(div().flex_1().min_h(px(0.)).relative().child(body).children(problems))
     }
+}
+
+/// Read a file for an editor tab: `Ok(None)` for binary files (shown in the hex view).
+/// Streams straight into a rope: a 1 GB file takes seconds and must not be held twice.
+fn load_file(path: &Path) -> anyhow::Result<Option<graphyne_core::Buffer>> {
+    if graphyne_core::fs_util::is_probably_binary(path) {
+        return Ok(None);
+    }
+    let file = std::fs::File::open(path)?;
+    Ok(Some(graphyne_core::Buffer::from_reader(std::io::BufReader::with_capacity(1 << 20, file))?))
 }

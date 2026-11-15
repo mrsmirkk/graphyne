@@ -22,6 +22,7 @@ use gpui::{
     WindowDecorations, WindowHandle, WindowOptions, div, point, px, size,
 };
 use graphyne_core::LanguageId;
+use graphyne_core::session::{self, ProjectState, WindowState};
 use graphyne_core::run::{RunPlan, ShellKind};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -126,7 +127,8 @@ impl Focusable for Workspace {
 }
 
 impl Workspace {
-    pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `state`: this project's layout from the last session (tabs, panels, …), if any.
+    pub fn new(root: PathBuf, state: Option<ProjectState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let file_tree = cx.new(|cx| FileTree::new(root.clone(), cx));
         let find = cx.new(|cx| FindPanel::new(root.clone(), cx));
         let git = cx.new(|cx| GitPanel::new(root.clone(), cx));
@@ -272,6 +274,15 @@ impl Workspace {
             _watcher: None,
             _subs: subs,
         };
+        if let Some(state) = state {
+            ws.apply_state(state, window, cx);
+        }
+        // Keep the session current even if Graphyne is killed: save when the window loses focus.
+        ws._subs.push(cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.save_state(window, cx);
+            }
+        }));
         crate::lua_bridge::register(cx.entity().downgrade(), window.window_handle(), cx);
         ws.index_project(cx);
         ws.start_watcher(cx);
@@ -280,6 +291,110 @@ impl Workspace {
         ws.terminal.update(cx, |t, _| t.debugger = Some(dbg));
         window.focus(&ws.focus_handle);
         ws
+    }
+
+    // ---------------------------------------------------------------- session
+
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    /// Put back the layout saved by [`Self::project_state`].
+    fn apply_state(&mut self, s: ProjectState, window: &mut Window, cx: &mut Context<Self>) {
+        self.left = s.left;
+        self.right = s.right;
+        self.bottom = s.bottom;
+        let plugin_tab = |t: &str| t.strip_prefix("plugin:").and_then(|id| id.parse::<u64>().ok());
+        self.left_tab = match s.left_tab.as_str() {
+            "search" => LeftTab::Search,
+            "git" => LeftTab::Git,
+            "history" => LeftTab::History,
+            t => plugin_tab(t).map(LeftTab::Plugin).unwrap_or(LeftTab::Files),
+        };
+        self.right_tab = match s.right_tab.as_str() {
+            "secrets" => RightTab::Secrets,
+            t => plugin_tab(t).map(RightTab::Plugin).unwrap_or(RightTab::Structure),
+        };
+        self.left_width = px(s.left_width.clamp(160., 1200.));
+        self.right_width = px(s.right_width.clamp(180., 1200.));
+        self.bottom_height = px(s.bottom_height.clamp(80., 1400.));
+        self.file_tree.update(cx, |t, cx| t.restore_expanded(s.expanded, cx));
+        self.pane.update(cx, |p, cx| p.restore(s.tabs, s.active_tab, window, cx));
+    }
+
+    /// Everything worth restoring next time: tabs with cursors, panels, window placement.
+    pub fn project_state(&self, window: &Window, cx: &App) -> ProjectState {
+        let (tabs, active_tab) = self.pane.read(cx).tab_states(cx);
+        let (bounds, maximized) = match window.window_bounds() {
+            WindowBounds::Windowed(b) => (b, false),
+            WindowBounds::Maximized(b) | WindowBounds::Fullscreen(b) => (b, true),
+        };
+        ProjectState {
+            root: self.root.clone(),
+            window: Some(WindowState {
+                x: f32::from(bounds.origin.x),
+                y: f32::from(bounds.origin.y),
+                width: f32::from(bounds.size.width),
+                height: f32::from(bounds.size.height),
+                maximized,
+            }),
+            left: self.left,
+            right: self.right,
+            bottom: self.bottom,
+            left_tab: match self.left_tab {
+                LeftTab::Files => "files".into(),
+                LeftTab::Search => "search".into(),
+                LeftTab::Git => "git".into(),
+                LeftTab::History => "history".into(),
+                LeftTab::Plugin(id) => format!("plugin:{id}"),
+            },
+            right_tab: match self.right_tab {
+                RightTab::Structure => "structure".into(),
+                RightTab::Secrets => "secrets".into(),
+                RightTab::Plugin(id) => format!("plugin:{id}"),
+            },
+            left_width: f32::from(self.left_width),
+            right_width: f32::from(self.right_width),
+            bottom_height: f32::from(self.bottom_height),
+            tabs,
+            active_tab,
+            expanded: self.file_tree.read(cx).expanded_dirs(),
+        }
+    }
+
+    /// Save this project's layout in the background.
+    fn save_state(&self, window: &Window, cx: &mut Context<Self>) {
+        let state = self.project_state(window, cx);
+        cx.background_spawn(async move {
+            if let Err(e) = session::save_project(&state) {
+                log::warn!("session: {e:#}");
+            }
+        })
+        .detach();
+    }
+
+    /// File › Close Project: save, close this window, and show the Welcome screen when no
+    /// other project is open. A closed project is not reopened on the next launch.
+    fn close_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tasks = self.pane.update(cx, |p, cx| p.save_all(cx));
+        let state = self.project_state(window, cx);
+        self.lsp_store.read(cx).shutdown_all();
+        if let Some(detached) = self.detached.take() {
+            detached.update(cx, |_, window, _| window.remove_window()).ok();
+        }
+        crate::project_closed(state, cx);
+        let handle = window.window_handle();
+        cx.spawn(async move |_, cx| {
+            for t in tasks {
+                t.await;
+            }
+            cx.update(|cx| {
+                handle.update(cx, |_, window, _| window.remove_window()).ok();
+                crate::window_closed(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     // ---------------------------------------------------------------- project services
@@ -575,7 +690,7 @@ impl Workspace {
             for t in tasks {
                 t.await;
             }
-            cx.update(|cx| cx.quit()).ok();
+            cx.update(crate::quit_app).ok();
         })
         .detach();
     }
@@ -678,6 +793,7 @@ impl Workspace {
                 self.left_tab = LeftTab::History;
             }
             IdeAction::OpenFolder => crate::prompt_open_folder(cx),
+            IdeAction::CloseProject => self.close_project(window, cx),
             IdeAction::Plugins => self.pane.update(cx, |p, cx| p.open_plugins_page(window, cx)),
             IdeAction::Quit => self.quit(&Quit, window, cx),
         }
@@ -1482,6 +1598,10 @@ impl Workspace {
             crate::prompt_open_folder(cx);
             cx.notify();
         }));
+        let close_project = item("menu-close-project", "Close Project".into(), Some("back to the Welcome screen".into()), None).on_click(cx.listener(|this, _, window, cx| {
+            this.menu = None;
+            this.close_project(window, cx);
+        }));
         let panel = div()
             .id("menu")
             .occlude()
@@ -1507,6 +1627,7 @@ impl Workspace {
                 panel
                     .left(px(110.))
                     .child(open_folder)
+                    .child(close_project)
                     .child(section("RECENT PROJECTS"))
                     .when(recent.is_empty(), |d| d.child(div().px(px(10.)).py(px(6.)).text_color(color(c::TEXT_DIM)).child("No other recent projects")))
                     .children(recent.into_iter().enumerate().map(|(ix, path)| {
@@ -1599,6 +1720,7 @@ impl Workspace {
             Menu::App => panel
                 .right(px(130.))
                 .child(open_folder)
+                .child(close_project)
                 .child(item("menu-plugins", "Plugins".into(), None, None).on_click(cx.listener(|this, _, window, cx| {
                     this.menu = None;
                     this.pane.update(cx, |p, cx| p.open_plugins_page(window, cx));

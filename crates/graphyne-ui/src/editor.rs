@@ -254,6 +254,30 @@ impl Editor {
         }
     }
 
+    /// For the session: (cursor, selection anchor, first visible line, horizontal scroll).
+    /// Lines are buffer lines, so the `N usages` rows above functions don't skew them.
+    pub fn view_state(&self) -> ((usize, usize), (usize, usize), f32, f32) {
+        let line_height = self.layout.as_ref().map(|l| f32::from(l.line_height)).unwrap_or_else(theme::code_line_height).max(1.);
+        let display = f32::from(self.scroll_y) / line_height;
+        let mut row = display.floor() as usize;
+        while row > 0 && self.display_row(row) as f32 > display {
+            row -= 1;
+        }
+        let top = row as f32 + (display - self.display_row(row) as f32).clamp(0., 0.99);
+        (self.buffer.row_col(self.sel.head), self.buffer.row_col(self.sel.anchor), top, f32::from(self.scroll_x))
+    }
+
+    /// Put back what [`Self::view_state`] saved; positions past the end are clamped.
+    pub fn restore_view(&mut self, cursor: (usize, usize), anchor: (usize, usize), top_line: f32, scroll_x: f32, cx: &mut Context<Self>) {
+        self.sel = Selection { anchor: self.buffer.char_at(anchor.0, anchor.1), head: self.buffer.char_at(cursor.0, cursor.1) };
+        self.goal_col = None;
+        self.scroll_y = px(top_line.max(0.) * theme::code_line_height());
+        self.scroll_x = px(scroll_x.max(0.));
+        self.autoscroll = false;
+        self.center_on_cursor = false;
+        cx.notify();
+    }
+
     pub fn go_to(&mut self, row: usize, col: usize, window: &mut Window, cx: &mut Context<Self>) {
         let pos = self.buffer.char_at(row, col);
         self.sel = Selection::caret(pos);

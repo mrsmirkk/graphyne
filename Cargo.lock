@@ -2532,6 +2532,7 @@ dependencies = [
  "nucleo",
  "regex",
  "ropey",
+ "serde",
  "serde_json",
  "unicode-segmentation",
 ]

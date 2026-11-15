@@ -8,6 +8,7 @@
 //! * [`fs_util`]   — atomic writes and binary sniffing.
 //! * [`run`]       — One-Click Run planner.
 //! * [`toolchain`] — background toolchain version probing.
+//! * [`session`]   — what was open at exit (projects, tabs, cursors, panels, window).
 
 pub mod buffer;
 pub mod fs_util;
@@ -20,6 +21,7 @@ pub mod project;
 pub mod recent;
 pub mod run;
 pub mod secrets;
+pub mod session;
 pub mod toolchain;
 
 pub use buffer::{Buffer, EditDelta, LineEnding, Selection, TextPoint};

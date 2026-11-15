@@ -95,6 +95,25 @@ impl FileTree {
         .detach();
     }
 
+    /// Expanded folders inside the project (for the session), parents first.
+    pub fn expanded_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = self.expanded.iter().filter(|d| **d != self.root && d.starts_with(&self.root)).cloned().collect();
+        dirs.sort();
+        dirs
+    }
+
+    /// Re-expand folders saved by [`Self::expanded_dirs`] (missing ones are skipped).
+    pub fn restore_expanded(&mut self, dirs: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        for d in dirs.into_iter().filter(|d| d.starts_with(&root) && d.is_dir()) {
+            if self.expanded.insert(d.clone()) {
+                self.load_dir(d, cx);
+            }
+        }
+        self.rebuild();
+        cx.notify();
+    }
+
     /// Re-read every expanded directory (after saves / window activation).
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let dirs: Vec<PathBuf> = self.expanded.iter().cloned().collect();

@@ -24,6 +24,7 @@ pub enum IdeAction {
     GitPanel,
     History,
     OpenFolder,
+    CloseProject,
     Plugins,
     Quit,
 }
@@ -40,6 +41,7 @@ const ACTIONS: &[(&str, &str, IdeAction)] = &[
     ("Git: Commit Changes", "", IdeAction::GitPanel),
     ("Git: Show History", "", IdeAction::History),
     ("Open Folder…", "", IdeAction::OpenFolder),
+    ("Close Project", "", IdeAction::CloseProject),
     ("Plugins", "", IdeAction::Plugins),
     ("Exit", "Ctrl+Q", IdeAction::Quit),
 ];
