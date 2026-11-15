@@ -137,6 +137,13 @@ pub struct Workspace {
     dragging: Option<Splitter>,
     py_env: PyEnv,
     after_env: Vec<AfterEnv>,
+    /// requirements.txt isn't installed in .venv: ask (packages it lists, whether an earlier
+    /// version was installed).
+    ask_requirements: Option<(usize, bool)>,
+    /// "Not now" — no more asking this session unless requirements.txt changes.
+    requirements_snoozed: bool,
+    /// Background pip install of requirements.txt (status bar text).
+    pip_status: Option<SharedString>,
     /// Compilers / runtimes Run needs that aren't installed (status bar, messages).
     missing_tools: HashMap<LanguageId, graphyne_core::toolchain::MissingTool>,
     /// Languages already checked for a missing compiler this session.
@@ -299,6 +306,9 @@ impl Workspace {
             dragging: None,
             py_env: PyEnv::Unknown,
             after_env: Vec::new(),
+            ask_requirements: None,
+            requirements_snoozed: false,
+            pip_status: None,
             missing_tools: HashMap::new(),
             checked_tools: HashSet::new(),
             window_handle: window.window_handle(),
@@ -317,6 +327,7 @@ impl Workspace {
         crate::lua_bridge::register(cx.entity().downgrade(), window.window_handle(), cx);
         ws.index_project(cx);
         ws.start_watcher(cx);
+        ws.check_requirements(cx);
         ws.terminal.update(cx, |t, cx| t.ensure_terminal(cx));
         let dbg = ws.debugger.clone();
         ws.terminal.update(cx, |t, _| t.debugger = Some(dbg));
@@ -544,6 +555,10 @@ impl Workspace {
                 d.update(cx, |d, cx| d.refresh(cx));
             }
         }
+        if files.iter().any(|p| *p == self.root.join("requirements.txt")) {
+            self.requirements_snoozed = false;
+            self.check_requirements(cx);
+        }
         if !files.is_empty() && !self.indexing {
             // Files that weren't in the project before: get Python ready, check compilers.
             let new_files: Vec<PathBuf> = files
@@ -744,6 +759,7 @@ impl Workspace {
         match result {
             Ok(Outcome::Ready { created_venv, installed_debugpy, .. }) => {
                 self.py_env = PyEnv::Ready;
+                self.check_requirements(cx);
                 if created_venv || installed_debugpy {
                     let done = if created_venv { "created .venv and installed debugpy" } else { "installed debugpy into the project's environment" };
                     self.notify_user(format!("Python: {done}. Run and Debug use it."), false, cx);
@@ -777,6 +793,126 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    /// Does .venv lack the packages from requirements.txt? Then ask (never install unasked:
+    /// installing runs the packages' code).
+    fn check_requirements(&mut self, cx: &mut Context<Self>) {
+        if self.requirements_snoozed || self.pip_status.is_some() {
+            return;
+        }
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let state = cx.background_spawn(async move { graphyne_core::python_env::requirements(&root) }).await;
+            this.update(cx, |this, cx| {
+                this.ask_requirements = match state {
+                    graphyne_core::python_env::Requirements::Ask { packages, changed } if !this.requirements_snoozed => Some((packages, changed)),
+                    _ => None,
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn install_requirements(&mut self, cx: &mut Context<Self>) {
+        self.ask_requirements = None;
+        self.pip_status = Some("Python: installing requirements.txt…".into());
+        cx.notify();
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move { graphyne_core::python_env::install_requirements(&root) }).await;
+            this.update(cx, |this, cx| {
+                this.pip_status = None;
+                match result {
+                    Ok(()) => {
+                        this.notify_user("Python: installed the packages from requirements.txt into .venv.", false, cx);
+                        if let Some(client) = this.lsp_store.read(cx).client_for(LanguageId::Python) {
+                            client.notify("workspace/didChangeConfiguration", serde_json::json!({ "settings": {} }));
+                        }
+                    }
+                    Err(e) => {
+                        this.notify_user(format!("Python: {e}"), true, cx);
+                        this.show_notifications = true;
+                        this.unread = false;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The question about requirements.txt (bottom right, until answered).
+    fn render_requirements_ask(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let (packages, changed) = self.ask_requirements?;
+        let button = |id: &'static str, label: &'static str, primary: bool| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .h(px(28.))
+                .px(px(12.))
+                .rounded(px(6.))
+                .border_1()
+                .cursor_pointer()
+                .text_size(px(theme::UI_SMALL))
+                .when(primary, |d| d.bg(color(c::ACCENT)).border_color(color(c::ACCENT)).text_color(color(0xFFFFFF)).hover(|s| s.bg(color_a(c::ACCENT, 0.85))))
+                .when(!primary, |d| d.border_color(color(c::POPUP_BORDER)).text_color(color(c::TEXT)).hover(|s| s.bg(color(c::HOVER))))
+                .child(label)
+        };
+        let what = if packages == 1 { "1 package".to_string() } else { format!("{packages} packages") };
+        let text = if changed {
+            format!("requirements.txt changed ({what}). Install it into .venv? Installing runs the packages' setup code — do it for projects you trust.")
+        } else {
+            format!("requirements.txt lists {what} that .venv doesn't have yet. Installing runs their setup code — do it for projects you trust.")
+        };
+        Some(
+            div()
+                .id("requirements-ask")
+                .occlude()
+                .absolute()
+                .right(px(16.))
+                .bottom(px(theme::STATUS_BAR_HEIGHT + 10.))
+                .w(px(380.))
+                .p(px(14.))
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .rounded(px(10.))
+                .bg(color(c::POPUP))
+                .border_1()
+                .border_color(color(c::POPUP_BORDER))
+                .shadow_lg()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(crate::file_icons::file_icon(std::path::Path::new("requirements.txt")))
+                        .child(div().text_color(color(c::TEXT)).font_weight(gpui::FontWeight::MEDIUM).child("Install Python packages?")),
+                )
+                .child(div().text_color(color(c::TEXT_MUTED)).child(text))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.))
+                        .child(button("req-install", "Install", true).on_click(cx.listener(|this, _, _, cx| this.install_requirements(cx))))
+                        .child(button("req-later", "Not now", false).on_click(cx.listener(|this, _, _, cx| {
+                            this.ask_requirements = None;
+                            this.requirements_snoozed = true;
+                            cx.notify();
+                        })))
+                        .child(button("req-never", "Don't ask again", false).on_click(cx.listener(|this, _, _, cx| {
+                            this.ask_requirements = None;
+                            let root = this.root.clone();
+                            cx.background_spawn(async move { graphyne_core::python_env::decline_requirements(&root) }).detach();
+                            cx.notify();
+                        }))),
+                ),
+        )
     }
 
     pub(crate) fn notify_user(&mut self, text: impl Into<SharedString>, error: bool, cx: &mut Context<Self>) {
@@ -1667,6 +1803,9 @@ impl Workspace {
             }
             None => {}
         }
+        if let Some(text) = &self.pip_status {
+            right.insert(0, div().flex().items_center().gap(px(5.)).text_color(color(c::ACCENT)).child(icon(Icon::Refresh, 12., color(c::ACCENT))).child(text.clone()).into_any_element());
+        }
         if let PyEnv::Working(text) = &self.py_env {
             right.insert(0, div().flex().items_center().gap(px(5.)).text_color(color(c::ACCENT)).child(icon(Icon::Refresh, 12., color(c::ACCENT))).child(text.clone()).into_any_element());
         }
@@ -2111,6 +2250,7 @@ impl Render for Workspace {
         let right = self.right.then(|| self.render_right(cx));
         let status = self.render_status_bar(cx);
         let notifications = self.render_notifications(cx);
+        let requirements_ask = self.render_requirements_ask(cx);
         let menu = self.render_menu(cx);
 
         let center = div()
@@ -2194,6 +2334,7 @@ impl Render for Workspace {
             .child(islands)
             .child(status)
             .children(search_overlay)
+            .children(requirements_ask)
             .children(notifications)
             .children(menu)
     }

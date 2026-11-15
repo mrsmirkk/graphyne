@@ -27,8 +27,9 @@
   подсветка синтаксиса и автодополнение по словам из файла.
 - **Python** — достаточно установленного Python 3: когда в проекте появляется `.py`-файл (или при
   первом Run / Debug), Graphyne сам создаёт `.venv` и ставит туда `debugpy`; Run, Debug и pyright
-  используют этот `.venv`. Проекты Poetry / Pipenv / conda не трогает. Выключается в Settings →
-  Run & Debug.
+  используют этот `.venv`. Если есть `requirements.txt`, Graphyne спрашивает, установить ли пакеты
+  (Install / Not now / Don't ask again) — без согласия ничего не ставит; после изменения файла
+  спросит снова. Проекты Poetry / Pipenv / conda не трогает. Выключается в Settings → Run & Debug.
 - **Отладка Rust / C / C++ / Go** — `lldb-dap` или CodeLLDB, `gdb` ≥ 14, `dlv` (не проверено).
 
 ## Горячие клавиши

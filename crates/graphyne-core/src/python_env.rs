@@ -114,6 +114,88 @@ pub fn ensure(root: &Path, progress: impl Fn(Step)) -> Result<Outcome, String> {
     Ok(Outcome::Ready { python, created_venv, installed_debugpy })
 }
 
+/// What to do about the project's `requirements.txt`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Requirements {
+    /// No `requirements.txt`, or no `.venv` to install into.
+    NotApplicable,
+    /// Installed (or declined) for this exact version of the file.
+    UpToDate,
+    /// Not installed yet: ask. `packages` = lines naming a package; `changed` = an earlier
+    /// version of the file was installed.
+    Ask { packages: usize, changed: bool },
+}
+
+/// `.venv/.graphyne-requirements`: hashes of the requirements.txt Graphyne installed or the
+/// user declined, so the question comes back only when the file changes.
+fn marker(venv: &Path) -> PathBuf {
+    venv.join(".graphyne-requirements")
+}
+
+fn content_hash(text: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+fn read_marker(venv: &Path) -> serde_json::Value {
+    std::fs::read_to_string(marker(venv)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(serde_json::Value::Null)
+}
+
+fn write_marker(venv: &Path, key: &str, hash: &str) {
+    let mut m = read_marker(venv);
+    if !m.is_object() {
+        m = serde_json::json!({});
+    }
+    m[key] = serde_json::Value::String(hash.to_string());
+    let _ = std::fs::write(marker(venv), m.to_string());
+}
+
+/// Lines of a requirements file that name a package (not comments or pip options).
+pub fn package_lines(text: &str) -> usize {
+    text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('-')).count()
+}
+
+pub fn requirements(root: &Path) -> Requirements {
+    let (Some(venv), Ok(text)) = (find_venv(root), std::fs::read_to_string(root.join("requirements.txt"))) else {
+        return Requirements::NotApplicable;
+    };
+    let packages = package_lines(&text);
+    if packages == 0 {
+        return Requirements::NotApplicable;
+    }
+    let hash = content_hash(&text);
+    let m = read_marker(&venv);
+    if m["installed"] == hash.as_str() || m["declined"] == hash.as_str() {
+        return Requirements::UpToDate;
+    }
+    Requirements::Ask { packages, changed: m["installed"].is_string() }
+}
+
+/// `pip install -r requirements.txt` into the project's `.venv` (this runs the packages'
+/// install code — only after the user agreed).
+pub fn install_requirements(root: &Path) -> Result<(), String> {
+    let venv = find_venv(root).ok_or("the project has no .venv")?;
+    let python = venv_python(&venv);
+    let text = std::fs::read_to_string(root.join("requirements.txt")).map_err(|e| format!("requirements.txt: {e}"))?;
+    run(
+        command(&python).args(["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--timeout", "60", "-r", "requirements.txt"]).current_dir(root),
+        "installing requirements.txt",
+    )?;
+    write_marker(&venv, "installed", &content_hash(&text));
+    Ok(())
+}
+
+/// "Don't ask again" — until requirements.txt changes.
+pub fn decline_requirements(root: &Path) {
+    if let (Some(venv), Ok(text)) = (find_venv(root), std::fs::read_to_string(root.join("requirements.txt"))) {
+        write_marker(&venv, "declined", &content_hash(&text));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +215,29 @@ mod tests {
         assert_eq!(managed_elsewhere(&root), None);
         std::fs::write(root.join("poetry.lock"), "").unwrap();
         assert_eq!(managed_elsewhere(&root), Some("poetry.lock"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn requirements_are_asked_once_per_version() {
+        let root = std::env::temp_dir().join(format!("graphyne-req-test-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".venv")).unwrap();
+        assert_eq!(requirements(&root), Requirements::NotApplicable, "no venv config, no file");
+        std::fs::write(root.join(".venv").join("pyvenv.cfg"), "").unwrap();
+        std::fs::write(root.join("requirements.txt"), "# deps
+requests>=2
+-r other.txt
+
+flask
+").unwrap();
+        assert_eq!(requirements(&root), Requirements::Ask { packages: 2, changed: false });
+        decline_requirements(&root);
+        assert_eq!(requirements(&root), Requirements::UpToDate);
+        std::fs::write(root.join("requirements.txt"), "requests>=2
+flask
+rich
+").unwrap();
+        assert_eq!(requirements(&root), Requirements::Ask { packages: 3, changed: false }, "asked again after a change");
         std::fs::remove_dir_all(&root).ok();
     }
 }
