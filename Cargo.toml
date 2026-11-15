@@ -16,8 +16,8 @@ default-members = ["crates/graphyne"]
 [workspace.package]
 version = "0.1.0-alpha.2"
 edition = "2024"
-license = "MIT OR Apache-2.0"
-authors = ["Graphyne contributors"]
+license = "MIT"
+authors = ["mr.smirk"]
 
 [workspace.dependencies]
 graphyne-core = { path = "crates/graphyne-core" }

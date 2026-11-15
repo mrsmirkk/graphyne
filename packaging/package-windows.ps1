@@ -23,6 +23,7 @@ New-Item -ItemType Directory -Force $out | Out-Null
 
 Copy-Item (Join-Path $root "target\release\graphyne.exe") $out
 Copy-Item (Join-Path $root "packaging\README.md") $out
+Copy-Item (Join-Path $root "LICENSE") $out
 
 # Example extensions → plugins\ next to graphyne.exe. Grammar projects (grammar\Cargo.toml)
 # are built and their library copied in as <extension>.dll.
@@ -49,7 +50,7 @@ foreach ($ext in Get-ChildItem (Join-Path $root "extensions") -Directory) {
 $notices = New-Object System.Collections.Generic.List[string]
 $notices.Add("# Third-party notices")
 $notices.Add("")
-$notices.Add("Graphyne $version bundles the following third-party components.")
+$notices.Add("Graphyne $version is MIT-licensed (see LICENSE) and bundles the following third-party components.")
 $notices.Add("")
 $notices.Add("## UI icons: Lucide (ISC)")
 $notices.Add("")

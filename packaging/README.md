@@ -143,4 +143,5 @@ JetBrains Mono и Inter); размеры шрифта, подсказки «N us
 
 ## Лицензии
 
-Сторонние компоненты и их лицензии — в `THIRD-PARTY-NOTICES.md`.
+Graphyne распространяется по лицензии MIT (`LICENSE`). Сторонние компоненты и их лицензии —
+в `THIRD-PARTY-NOTICES.md`.
