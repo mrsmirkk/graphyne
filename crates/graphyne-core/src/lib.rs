@@ -22,6 +22,7 @@ pub mod recent;
 pub mod run;
 pub mod secrets;
 pub mod session;
+pub mod settings;
 pub mod toolchain;
 
 pub use buffer::{Buffer, EditDelta, LineEnding, Selection, TextPoint};

@@ -445,7 +445,7 @@ impl Editor {
     }
 
     fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
-        if self.path.is_none() {
+        if self.path.is_none() || !theme::autosave_enabled() {
             return;
         }
         self.autosave_task = Some(cx.spawn(async move |this, cx| {
@@ -1710,6 +1710,13 @@ impl Editor {
         row - hidden_rows + self.lenses.partition_point(|(r, _)| *r <= row) - self.hidden_lenses_before(row)
     }
 
+    /// Settings changed: re-derive what depends on them (usage hints).
+    pub fn settings_changed(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_lenses();
+        self.clamp_scroll();
+        cx.notify();
+    }
+
     // ----- code folding -----
 
     /// The folded region hiding `row`, if any: (header row, last hidden row).
@@ -1983,6 +1990,9 @@ pub(crate) fn lens_items(outline: &[OutlineItem]) -> Vec<(&OutlineItem, (String,
 /// `N usages` lenses: language-server reference counts when known, else same-file
 /// identifier occurrences minus the declaration.
 fn build_lenses(outline: &[OutlineItem], counts: &HashMap<String, u32>, usages: &HashMap<(String, usize), usize>) -> Vec<(usize, SharedString)> {
+    if !theme::usage_hints() {
+        return Vec::new();
+    }
     let mut lenses: Vec<(usize, SharedString)> = lens_items(outline)
         .into_iter()
         .map(|(i, key)| {

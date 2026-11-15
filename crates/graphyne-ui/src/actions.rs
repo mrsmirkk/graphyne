@@ -7,6 +7,7 @@ actions!(
     [
         ToggleLeftDock,
         ToggleBottomDock,
+        OpenSettings,
         ToggleRightDock,
         SearchEverywhere,
         RunActive,
@@ -133,6 +134,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-enter", editor::ShowCodeActions, ed),
         KeyBinding::new(&m("mod-p"), editor::ParameterInfo, ed),
         KeyBinding::new(&m("mod-j"), ToggleBottomDock, ws),
+        KeyBinding::new(&m("mod-,"), OpenSettings, ws),
         KeyBinding::new(&m("mod-alt-b"), ToggleRightDock, ws),
         KeyBinding::new(&m("mod-shift-t"), NewTerminal, ws),
         KeyBinding::new(&m("mod-f4"), CloseActiveTab, ws),

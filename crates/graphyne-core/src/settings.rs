@@ -1,0 +1,116 @@
+//! Graphyne's own settings — fonts, autosave, terminal shell, startup — kept in
+//! `<state dir>/settings.json` (see [`crate::session::state_dir`]) and edited in the
+//! Settings tab. Native, not Lua: plugins add themes and languages, not core options.
+
+use serde::{Deserialize, Serialize};
+use std::ops::RangeInclusive;
+use std::path::Path;
+
+pub const FONT_SIZES: RangeInclusive<f32> = 9.0..=32.0;
+pub const AUTOSAVE_DELAYS_MS: RangeInclusive<u64> = 100..=10_000;
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Settings {
+    /// Code font for the editor and terminal; `None` picks the best installed one.
+    #[serde(rename = "editor.font_family")]
+    pub editor_font: Option<String>,
+    #[serde(rename = "editor.font_size")]
+    pub editor_font_size: f32,
+    /// `N usages` lines above functions and types.
+    #[serde(rename = "editor.usage_hints")]
+    pub usage_hints: bool,
+    /// Type and parameter-name hints from the language server.
+    #[serde(rename = "editor.inlay_hints")]
+    pub inlay_hints: bool,
+    #[serde(rename = "editor.autosave")]
+    pub autosave: bool,
+    #[serde(rename = "editor.autosave_delay_ms")]
+    pub autosave_delay_ms: u64,
+    #[serde(rename = "terminal.font_size")]
+    pub terminal_font_size: f32,
+    /// "auto" or a shell id from `graphyne_terminal::available_shells`.
+    #[serde(rename = "terminal.shell")]
+    pub shell: String,
+    /// Reopen the last session's projects on launch (off: always the Welcome screen).
+    #[serde(rename = "startup.reopen_projects")]
+    pub reopen_projects: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            editor_font: None,
+            editor_font_size: 13.5,
+            usage_hints: true,
+            inlay_hints: true,
+            autosave: true,
+            autosave_delay_ms: 500,
+            terminal_font_size: 13.0,
+            shell: "auto".into(),
+            reopen_projects: true,
+        }
+    }
+}
+
+impl Settings {
+    /// Values a hand-edited file may have pushed out of range are pulled back in.
+    pub fn sanitized(mut self) -> Self {
+        let size = |v: f32, default: f32| if v.is_finite() { (v * 2.).round() / 2. } else { default }.clamp(*FONT_SIZES.start(), *FONT_SIZES.end());
+        self.editor_font_size = size(self.editor_font_size, 13.5);
+        self.terminal_font_size = size(self.terminal_font_size, 13.0);
+        self.autosave_delay_ms = self.autosave_delay_ms.clamp(*AUTOSAVE_DELAYS_MS.start(), *AUTOSAVE_DELAYS_MS.end());
+        self.editor_font = self.editor_font.filter(|f| !f.trim().is_empty());
+        if self.shell.trim().is_empty() {
+            self.shell = "auto".into();
+        }
+        self
+    }
+}
+
+pub fn load_from(dir: &Path) -> Settings {
+    let path = dir.join("settings.json");
+    let Ok(text) = std::fs::read_to_string(&path) else { return Settings::default() };
+    match serde_json::from_str::<Settings>(&text) {
+        Ok(s) => s.sanitized(),
+        Err(e) => {
+            log::warn!("{}: {e}", path.display());
+            Settings::default()
+        }
+    }
+}
+
+pub fn save_to(dir: &Path, settings: &Settings) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    crate::fs_util::atomic_write(&dir.join("settings.json"), serde_json::to_string_pretty(settings)?.as_bytes())
+}
+
+pub fn load() -> Settings {
+    crate::session::state_dir().map(|d| load_from(&d)).unwrap_or_default()
+}
+
+pub fn save(settings: &Settings) -> anyhow::Result<()> {
+    match crate::session::state_dir() {
+        Some(dir) => save_to(&dir, settings),
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_round_trip_and_sanitize() {
+        let dir = std::env::temp_dir().join(format!("graphyne-settings-test-{}", std::process::id()));
+        assert_eq!(load_from(&dir), Settings::default());
+        let s = Settings { editor_font: Some("Consolas".into()), editor_font_size: 16., autosave: false, shell: "cmd".into(), ..Default::default() };
+        save_to(&dir, &s).unwrap();
+        assert_eq!(load_from(&dir), s);
+        // Hand edits: unknown keys ignored, missing keys default, out-of-range values clamped.
+        std::fs::write(dir.join("settings.json"), r#"{ "editor.font_size": 100, "editor.autosave_delay_ms": 5, "x": 1 }"#).unwrap();
+        let loaded = load_from(&dir);
+        assert_eq!((loaded.editor_font_size, loaded.autosave_delay_ms, loaded.usage_hints), (32., 100, true));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

@@ -174,15 +174,81 @@ pub struct SpawnOptions {
     pub rows: u16,
 }
 
-/// The platform default interactive shell.
-pub fn default_shell() -> (String, Vec<String>) {
+/// Shell chosen in Settings ("auto" or an id from [`available_shells`]).
+static PREFERRED_SHELL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Use this shell for new terminal tabs (`None` / "auto": the platform default).
+pub fn set_preferred_shell(id: Option<String>) {
+    if let Ok(mut s) = PREFERRED_SHELL.lock() {
+        *s = id.filter(|id| id != "auto");
+    }
+}
+
+#[cfg(windows)]
+fn git_bash() -> Option<std::path::PathBuf> {
+    ["ProgramFiles", "ProgramW6432", "LOCALAPPDATA"].iter().filter_map(std::env::var_os).find_map(|base| {
+        let base = std::path::PathBuf::from(base);
+        [base.join("Git").join("bin").join("bash.exe"), base.join("Programs").join("Git").join("bin").join("bash.exe")].into_iter().find(|p| p.is_file())
+    })
+}
+
+fn in_path(exe: &str) -> bool {
+    std::env::var_os("PATH").map(|p| std::env::split_paths(&p).any(|d| d.join(exe).is_file())).unwrap_or(false)
+}
+
+/// Shells found on this machine, as (id, label); "auto" first.
+pub fn available_shells() -> Vec<(String, String)> {
+    let mut out = vec![("auto".to_string(), "Automatic".to_string())];
     #[cfg(windows)]
     {
-        let in_path = |exe: &str| {
-            std::env::var_os("PATH")
-                .map(|p| std::env::split_paths(&p).any(|d| d.join(exe).is_file()))
-                .unwrap_or(false)
-        };
+        if in_path("pwsh.exe") {
+            out.push(("pwsh".into(), "PowerShell 7".into()));
+        }
+        out.push(("powershell".into(), "Windows PowerShell".into()));
+        out.push(("cmd".into(), "Command Prompt".into()));
+        if git_bash().is_some() {
+            out.push(("gitbash".into(), "Git Bash".into()));
+        }
+        if in_path("wsl.exe") {
+            out.push(("wsl".into(), "WSL".into()));
+        }
+    }
+    #[cfg(not(windows))]
+    for (id, label) in [("bash", "bash"), ("zsh", "zsh"), ("fish", "fish")] {
+        if in_path(id) {
+            out.push((id.into(), label.into()));
+        }
+    }
+    out
+}
+
+fn shell_command(id: &str) -> Option<(String, Vec<String>)> {
+    #[cfg(windows)]
+    {
+        match id {
+            "pwsh" => Some(("pwsh.exe".into(), vec!["-NoLogo".into()])),
+            "powershell" => Some(("powershell.exe".into(), vec!["-NoLogo".into()])),
+            "cmd" => Some(("cmd.exe".into(), Vec::new())),
+            "gitbash" => git_bash().map(|p| (p.to_string_lossy().into_owned(), vec!["--login".into(), "-i".into()])),
+            "wsl" => Some(("wsl.exe".into(), Vec::new())),
+            _ => None,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        matches!(id, "bash" | "zsh" | "fish").then(|| (id.to_string(), vec!["-l".into()]))
+    }
+}
+
+/// The interactive shell for new terminal tabs: the one chosen in Settings, else the
+/// platform default.
+pub fn default_shell() -> (String, Vec<String>) {
+    let preferred = PREFERRED_SHELL.lock().ok().and_then(|s| s.clone());
+    if let Some(cmd) = preferred.as_deref().and_then(shell_command) {
+        return cmd;
+    }
+    #[cfg(windows)]
+    {
         if in_path("pwsh.exe") {
             return ("pwsh.exe".into(), vec!["-NoLogo".into()]);
         }

@@ -295,6 +295,11 @@ impl Workspace {
 
     // ---------------------------------------------------------------- session
 
+    /// Open editors (for settings that change how they look).
+    pub fn editors(&self, cx: &App) -> Vec<Entity<crate::editor::Editor>> {
+        self.pane.read(cx).editors().cloned().collect()
+    }
+
     pub fn root(&self) -> &std::path::Path {
         &self.root
     }
@@ -795,6 +800,7 @@ impl Workspace {
             IdeAction::OpenFolder => crate::prompt_open_folder(cx),
             IdeAction::CloseProject => self.close_project(window, cx),
             IdeAction::Plugins => self.pane.update(cx, |p, cx| p.open_plugins_page(window, cx)),
+            IdeAction::Settings => self.pane.update(cx, |p, cx| p.open_settings_page(window, cx)),
             IdeAction::Quit => self.quit(&Quit, window, cx),
         }
         cx.notify();
@@ -1396,6 +1402,9 @@ impl Workspace {
             Some(PaneItem::Plugins(_)) => {
                 crumbs.push("Plugins".into());
             }
+            Some(PaneItem::Settings(_)) => {
+                crumbs.push("Settings".into());
+            }
             Some(PaneItem::Diff(d)) => {
                 let d = d.read(cx);
                 if let Ok(rel) = d.path.strip_prefix(&self.root) {
@@ -1722,6 +1731,11 @@ impl Workspace {
             }
             Menu::App => panel
                 .right(px(130.))
+                .child(item("menu-settings", "Settings…".into(), None, Some("Ctrl+,")).on_click(cx.listener(|this, _, window, cx| {
+                    this.menu = None;
+                    this.pane.update(cx, |p, cx| p.open_settings_page(window, cx));
+                    cx.notify();
+                })))
                 .child(open_folder)
                 .child(close_project)
                 .child(item("menu-plugins", "Plugins".into(), None, None).on_click(cx.listener(|this, _, window, cx| {
@@ -1909,6 +1923,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_left))
             .on_action(cx.listener(Self::toggle_right))
             .on_action(cx.listener(Self::toggle_bottom))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.pane.update(cx, |p, cx| p.open_settings_page(window, cx))))
             .on_action(cx.listener(Self::focus_terminal))
             .on_action(cx.listener(Self::focus_editor))
             .on_action(cx.listener(Self::new_terminal))

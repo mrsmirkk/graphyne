@@ -1,6 +1,7 @@
 //! Graphyne GPUI front-end.
 
 mod actions;
+mod app_settings;
 mod assets;
 mod components;
 mod debug_panel;
@@ -17,6 +18,7 @@ mod lua_bridge;
 mod panels;
 mod plugins_page;
 mod search_everywhere;
+mod settings_page;
 mod terminal_view;
 mod text_input;
 mod theme;
@@ -54,6 +56,7 @@ pub fn run() {
         mark("run callback");
         theme::init_fonts(&cx.text_system().all_font_names());
         mark("font enumeration");
+        app_settings::init(cx);
         actions::bind_keys(cx);
         // LuaJIT plugins: the VM loads init.lua on its own thread.
         lua_bridge::init(cx);
@@ -74,7 +77,8 @@ pub fn run() {
         match root_arg.clone() {
             Some(root) => open_workspace(root, mark, cx),
             None => {
-                let last: Vec<PathBuf> = session::load_session().open.into_iter().filter(|p| p.is_dir()).collect();
+                let reopen = app_settings::get(cx).reopen_projects;
+                let last: Vec<PathBuf> = if reopen { session::load_session().open.into_iter().filter(|p| p.is_dir()).collect() } else { Vec::new() };
                 mark("session loaded");
                 if last.is_empty() {
                     welcome::open_welcome(cx);
@@ -85,6 +89,16 @@ pub fn run() {
             }
         }
     });
+}
+
+/// Every open editor in every project window (for settings that change how they look).
+pub(crate) fn all_editors(cx: &App) -> Vec<gpui::Entity<editor::Editor>> {
+    cx.windows()
+        .into_iter()
+        .filter_map(|w| w.downcast::<workspace::Workspace>())
+        .filter_map(|w| w.read(cx).ok().map(|ws| ws.editors(cx)))
+        .flatten()
+        .collect()
 }
 
 pub(crate) fn window_opened() {

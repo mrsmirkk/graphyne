@@ -6,6 +6,7 @@ use crate::diff_view::{DiffEvent, DiffView, HunkSelection};
 use crate::editor::{Editor, EditorEvent};
 use crate::hex_view::HexView;
 use crate::plugins_page::PluginsPage;
+use crate::settings_page::SettingsPage;
 use crate::theme::{self, c, color, color_a};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Task, Window, div, px};
@@ -21,6 +22,8 @@ pub enum PaneItem {
     Diff(Entity<DiffView>),
     /// Installed extensions, permissions and theme.
     Plugins(Entity<PluginsPage>),
+    /// Graphyne's own settings.
+    Settings(Entity<SettingsPage>),
 }
 
 impl PaneItem {
@@ -29,7 +32,7 @@ impl PaneItem {
             PaneItem::Editor(e) => e.read(cx).path.clone(),
             PaneItem::Hex(h) => Some(h.read(cx).path.clone()),
             // A diff tab never stands in for the file itself.
-            PaneItem::Diff(_) | PaneItem::Plugins(_) => None,
+            PaneItem::Diff(_) | PaneItem::Plugins(_) | PaneItem::Settings(_) => None,
         }
     }
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -38,6 +41,7 @@ impl PaneItem {
             PaneItem::Hex(h) => h.focus_handle(cx),
             PaneItem::Diff(d) => d.focus_handle(cx),
             PaneItem::Plugins(p) => p.focus_handle(cx),
+            PaneItem::Settings(p) => p.focus_handle(cx),
         }
     }
 }
@@ -148,6 +152,22 @@ impl EditorPane {
         cx.notify();
     }
 
+    /// Open (or focus) the Settings page.
+    pub fn open_settings_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.items.iter().position(|i| matches!(i, PaneItem::Settings(_))) {
+            Some(ix) => self.active = ix,
+            None => {
+                let page = cx.new(SettingsPage::new);
+                let at = (self.active + 1).min(self.items.len());
+                self.items.insert(at, PaneItem::Settings(page));
+                self.active = at;
+            }
+        }
+        self.focus_active(window, cx);
+        cx.emit(PaneEvent::Changed);
+        cx.notify();
+    }
+
     pub fn diff_views(&self) -> impl Iterator<Item = &Entity<DiffView>> {
         self.items.iter().filter_map(|i| match i {
             PaneItem::Diff(d) => Some(d),
@@ -242,6 +262,7 @@ impl EditorPane {
                 PaneItem::Hex(h) => TabState { kind: TabKind::File, path: Some(h.read(cx).path.clone()), ..Default::default() },
                 PaneItem::Diff(d) => TabState { kind: TabKind::Diff, path: Some(d.read(cx).path.clone()), ..Default::default() },
                 PaneItem::Plugins(_) => TabState { kind: TabKind::Plugins, ..Default::default() },
+                PaneItem::Settings(_) => TabState { kind: TabKind::Settings, ..Default::default() },
             })
             .collect();
         (tabs, self.active)
@@ -273,6 +294,7 @@ impl EditorPane {
                         (TabKind::File, Some(path), Some(Ok(None))) => PaneItem::Hex(cx.new(|cx| HexView::new(path, cx))),
                         (TabKind::Diff, Some(path), _) if path.is_file() => PaneItem::Diff(this.new_diff_view(path, cx)),
                         (TabKind::Plugins, _, _) => PaneItem::Plugins(cx.new(PluginsPage::new)),
+                        (TabKind::Settings, _, _) => PaneItem::Settings(cx.new(SettingsPage::new)),
                         _ => continue,
                     };
                     if ix <= active {
@@ -420,9 +442,11 @@ impl Render for EditorPane {
                 PaneItem::Hex(h) => (h.read(cx).title(), LanguageId::PlainText, false),
                 PaneItem::Diff(d) => (d.read(cx).title().to_string(), LanguageId::PlainText, false),
                 PaneItem::Plugins(_) => ("Plugins".to_string(), LanguageId::PlainText, false),
+                PaneItem::Settings(_) => ("Settings".to_string(), LanguageId::PlainText, false),
             };
             let is_diff = matches!(item, PaneItem::Diff(_));
             let is_plugins = matches!(item, PaneItem::Plugins(_));
+            let is_settings = matches!(item, PaneItem::Settings(_));
             header = header.child(
                 div()
                     .id(("tab", ix))
@@ -450,7 +474,8 @@ impl Render for EditorPane {
                     }))
                     .on_mouse_down(gpui::MouseButton::Middle, cx.listener(move |this, _, window, cx| this.close(ix, window, cx)))
                     .when(is_plugins, |d| d.child(icon(Icon::Puzzle, 14., color(c::ACCENT))))
-                    .when(!is_plugins, |d| d.child(crate::file_icons::file_icon(Path::new(&title))))
+                    .when(is_settings, |d| d.child(icon(Icon::Settings, 14., color(c::ACCENT))))
+                    .when(!is_plugins && !is_settings, |d| d.child(crate::file_icons::file_icon(Path::new(&title))))
                     .child(title)
                     .when(is_diff, |d| {
                         d.child(div().px(px(4.)).rounded(px(3.)).bg(color_a(c::GIT_MODIFIED, 0.18)).text_size(px(10.5)).text_color(color(c::GIT_MODIFIED)).child("diff"))
@@ -484,6 +509,7 @@ impl Render for EditorPane {
             Some(PaneItem::Hex(h)) => h.clone().into_any_element(),
             Some(PaneItem::Diff(d)) => d.clone().into_any_element(),
             Some(PaneItem::Plugins(p)) => p.clone().into_any_element(),
+            Some(PaneItem::Settings(p)) => p.clone().into_any_element(),
             None => empty_state().into_any_element(),
         };
         let problems = self.render_problems(cx);

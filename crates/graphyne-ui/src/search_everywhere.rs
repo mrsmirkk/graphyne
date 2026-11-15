@@ -26,6 +26,7 @@ pub enum IdeAction {
     OpenFolder,
     CloseProject,
     Plugins,
+    Settings,
     Quit,
 }
 
@@ -43,6 +44,7 @@ const ACTIONS: &[(&str, &str, IdeAction)] = &[
     ("Open Folder…", "", IdeAction::OpenFolder),
     ("Close Project", "", IdeAction::CloseProject),
     ("Plugins", "", IdeAction::Plugins),
+    ("Settings", "Ctrl+,", IdeAction::Settings),
     ("Exit", "Ctrl+Q", IdeAction::Quit),
 ];
 

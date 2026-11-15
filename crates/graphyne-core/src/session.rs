@@ -46,6 +46,8 @@ pub enum TabKind {
     Diff,
     /// The Plugins page.
     Plugins,
+    /// The Settings page.
+    Settings,
 }
 
 /// One editor tab. Positions are (line, column) from 0, so they survive outside edits.

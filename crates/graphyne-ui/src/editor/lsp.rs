@@ -425,7 +425,7 @@ impl Editor {
 
     /// Hints for one buffer row as (column, label).
     pub(super) fn hints_for_row(&self, row: usize) -> Vec<(usize, String)> {
-        if self.lsp.hints.is_empty() {
+        if self.lsp.hints.is_empty() || !crate::theme::inlay_hints() {
             return Vec::new();
         }
         let start = self.buffer.line_to_char(row);

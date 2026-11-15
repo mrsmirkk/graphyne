@@ -3,7 +3,7 @@
 use gpui::{Hsla, Pixels, Rgba, px, rgb, rgba};
 use graphyne_syntax::HighlightKind;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 pub mod c {
     //! Raw 0xRRGGBB constants.
@@ -201,12 +201,23 @@ pub fn is_italic(kind: HighlightKind) -> bool {
     matches!(kind, HighlightKind::Comment)
 }
 
+#[derive(Clone, Copy)]
 pub struct Fonts {
     pub ui: &'static str,
     pub code: &'static str,
 }
 
-static FONTS: OnceLock<Fonts> = OnceLock::new();
+/// The code font can change at run time (Settings), hence a lock, not a `OnceLock`.
+static FONTS: std::sync::RwLock<Fonts> = std::sync::RwLock::new(Fonts { ui: "Inter", code: "JetBrains Mono" });
+static INSTALLED_FONTS: OnceLock<Vec<String>> = OnceLock::new();
+/// The code font chosen automatically (Settings › Editor font › Automatic).
+static AUTO_CODE_FONT: OnceLock<&'static str> = OnceLock::new();
+
+/// Monospace families offered in Settings, in order of preference.
+const CODE_FONTS: &[&str] = &[
+    "JetBrains Mono", "Cascadia Code", "Cascadia Mono", "Fira Code", "Source Code Pro", "Hack", "Iosevka",
+    "Consolas", "Menlo", "Ubuntu Mono", "DejaVu Sans Mono", "Lucida Console", "Courier New",
+];
 
 /// Resolve installed font families once (JetBrains Mono / Inter preferred).
 pub fn init_fonts(available: &[String]) {
@@ -214,11 +225,57 @@ pub fn init_fonts(available: &[String]) {
     let pick = |prefs: &[&'static str], fallback: &'static str| prefs.iter().copied().find(|p| has(p)).unwrap_or(fallback);
     let code = pick(&["JetBrains Mono", "Cascadia Mono", "Cascadia Code", "Consolas", "Menlo", "DejaVu Sans Mono"], "monospace");
     let ui = pick(&["Inter", "Inter Variable", "Segoe UI Variable Text", "Segoe UI", "SF Pro Text", "Ubuntu", "Cantarell"], ".SystemUIFont");
-    let _ = FONTS.set(Fonts { ui, code });
+    let _ = INSTALLED_FONTS.set(available.to_vec());
+    let _ = AUTO_CODE_FONT.set(code);
+    if let Ok(mut f) = FONTS.write() {
+        *f = Fonts { ui, code };
+    }
 }
 
-pub fn fonts() -> &'static Fonts {
-    FONTS.get_or_init(|| Fonts { ui: "Inter", code: "JetBrains Mono" })
+pub fn fonts() -> Fonts {
+    FONTS.read().map(|f| *f).unwrap_or(Fonts { ui: "Inter", code: "JetBrains Mono" })
+}
+
+/// Installed monospace families for the Settings font picker.
+pub fn code_fonts() -> Vec<&'static str> {
+    let installed = INSTALLED_FONTS.get().map(Vec::as_slice).unwrap_or(&[]);
+    CODE_FONTS.iter().copied().filter(|f| installed.iter().any(|i| i.eq_ignore_ascii_case(f))).collect()
+}
+
+/// Use `family` for code (`None`, or a font that isn't installed: the automatic choice).
+/// Returns whether the font changed.
+pub fn set_code_font(family: Option<&str>) -> bool {
+    let auto = AUTO_CODE_FONT.get().copied().unwrap_or("JetBrains Mono");
+    // Only names from the fixed list: font names become `&'static str` without leaking.
+    let code = family.and_then(|f| code_fonts().into_iter().find(|c| c.eq_ignore_ascii_case(f))).unwrap_or(auto);
+    match FONTS.write() {
+        Ok(mut f) if f.code != code => {
+            f.code = code;
+            true
+        }
+        _ => false,
+    }
+}
+
+static USAGE_HINTS: AtomicBool = AtomicBool::new(true);
+static INLAY_HINTS: AtomicBool = AtomicBool::new(true);
+static AUTOSAVE_ON: AtomicBool = AtomicBool::new(true);
+
+/// `N usages` lines above functions and types.
+pub fn usage_hints() -> bool {
+    USAGE_HINTS.load(Ordering::Relaxed)
+}
+/// Inlay type / parameter hints from the language server.
+pub fn inlay_hints() -> bool {
+    INLAY_HINTS.load(Ordering::Relaxed)
+}
+pub fn autosave_enabled() -> bool {
+    AUTOSAVE_ON.load(Ordering::Relaxed)
+}
+pub fn set_flags(usage_hints: bool, inlay_hints: bool, autosave: bool) {
+    USAGE_HINTS.store(usage_hints, Ordering::Relaxed);
+    INLAY_HINTS.store(inlay_hints, Ordering::Relaxed);
+    AUTOSAVE_ON.store(autosave, Ordering::Relaxed);
 }
 
 pub const UI_TEXT: f32 = 13.0;
