@@ -45,7 +45,15 @@ impl Rgb {
     }
 }
 
-/// Terminal colour scheme ("Fleet Dark" flavoured).
+/// Use the light terminal colours (Graphyne Light or another light theme).
+static LIGHT_PALETTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Switch every terminal between the dark and light colour schemes.
+pub fn set_light_palette(light: bool) {
+    LIGHT_PALETTE.store(light, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Terminal colour scheme (Graphyne Dark flavoured; see [`Palette::light`]).
 #[derive(Clone, Debug)]
 pub struct Palette {
     pub foreground: Rgb,
@@ -83,6 +91,39 @@ impl Default for Palette {
 }
 
 impl Palette {
+    /// For light themes: dark text on white; "white" ANSI colours are greys so text that
+    /// programs print in white stays readable (as in VS Code's light terminal).
+    pub fn light() -> Self {
+        Palette {
+            foreground: Rgb::hex(0x2B2D33),
+            background: Rgb::hex(0xFFFFFF),
+            cursor: Rgb::hex(0x2B2D33),
+            ansi: [
+                Rgb::hex(0x2B2D33),
+                Rgb::hex(0xCD3131),
+                Rgb::hex(0x1E8C3A),
+                Rgb::hex(0x8D7A00),
+                Rgb::hex(0x0451A5),
+                Rgb::hex(0xA626A4),
+                Rgb::hex(0x0E7C99),
+                Rgb::hex(0x5A5F68),
+                Rgb::hex(0x6A6F78),
+                Rgb::hex(0xD9534F),
+                Rgb::hex(0x2AA052),
+                Rgb::hex(0xA88F00),
+                Rgb::hex(0x2F6FE4),
+                Rgb::hex(0xBC4FBA),
+                Rgb::hex(0x1592B0),
+                Rgb::hex(0x8A9099),
+            ],
+        }
+    }
+
+    /// The scheme matching the current theme.
+    pub fn current() -> Self {
+        if LIGHT_PALETTE.load(std::sync::atomic::Ordering::Relaxed) { Self::light() } else { Self::default() }
+    }
+
     fn indexed(&self, i: u8) -> Rgb {
         match i {
             0..=15 => self.ansi[i as usize],
@@ -130,7 +171,6 @@ struct Listener {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     title: Arc<Mutex<Option<String>>>,
     size: Arc<Mutex<WindowSize>>,
-    palette: Arc<Palette>,
 }
 
 impl EventListener for Listener {
@@ -148,12 +188,13 @@ impl EventListener for Listener {
                 let _ = self.writer.lock().write_all(reply.as_bytes());
             }
             AlacEvent::ColorRequest(ix, format) => {
+                let palette = Palette::current();
                 let c = if ix < 16 {
-                    self.palette.ansi[ix]
+                    palette.ansi[ix]
                 } else if ix == NamedColor::Background as usize {
-                    self.palette.background
+                    palette.background
                 } else {
-                    self.palette.foreground
+                    palette.foreground
                 };
                 let reply = format(AnsiRgb { r: c.r, g: c.g, b: c.b });
                 let _ = self.writer.lock().write_all(reply.as_bytes());
@@ -296,7 +337,6 @@ pub struct TerminalState {
     title: Arc<Mutex<Option<String>>>,
     size: Arc<Mutex<WindowSize>>,
     exited: Arc<AtomicBool>,
-    palette: Arc<Palette>,
     wakeups: flume::Receiver<()>,
     shell_name: String,
 }
@@ -326,8 +366,7 @@ impl TerminalState {
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(pair.master.take_writer().context("taking pty writer")?));
         let title = Arc::new(Mutex::new(None));
         let size = Arc::new(Mutex::new(WindowSize { num_lines: rows, num_cols: cols, cell_width: 8, cell_height: 16 }));
-        let palette = Arc::new(Palette::default());
-        let listener = Listener { writer: writer.clone(), title: title.clone(), size: size.clone(), palette: palette.clone() };
+        let listener = Listener { writer: writer.clone(), title: title.clone(), size: size.clone() };
 
         let config = TermConfig { scrolling_history: 10_000, ..TermConfig::default() };
         let term = Arc::new(FairMutex::new(Term::new(config, &TermSize::new(cols as usize, rows as usize), listener)));
@@ -373,7 +412,6 @@ impl TerminalState {
             title,
             size,
             exited,
-            palette,
             wakeups: rx,
             shell_name,
         })
@@ -393,8 +431,9 @@ impl TerminalState {
     pub fn has_exited(&self) -> bool {
         self.exited.load(Ordering::SeqCst)
     }
-    pub fn palette(&self) -> &Palette {
-        &self.palette
+    /// Colours in use (they follow the theme, see [`set_light_palette`]).
+    pub fn palette(&self) -> Palette {
+        Palette::current()
     }
 
     pub fn write(&self, bytes: &[u8]) {
@@ -491,7 +530,7 @@ impl TerminalState {
         let display_offset = content.display_offset;
         let mut rows: Vec<Vec<TermRun>> = vec![Vec::new(); screen_lines];
         let mut row_text: Vec<String> = vec![String::new(); screen_lines];
-        let palette = &*self.palette;
+        let palette = &Palette::current();
         let default_bg = palette.background;
 
         for indexed in content.display_iter {

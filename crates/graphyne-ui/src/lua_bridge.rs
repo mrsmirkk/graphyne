@@ -87,11 +87,9 @@ pub fn set_permission(id: &str, perm: &str, granted: bool, cx: &mut App) {
 }
 
 /// Pick the colour theme (`None` = built-in) and remember it.
-pub fn choose_theme(name: Option<String>, cx: &mut App) {
-    crate::theme::activate_theme(name.as_deref());
-    cx.global_mut::<LuaState>().state.theme = name;
-    save_state(cx);
-    cx.refresh_windows();
+/// Use theme `name` (built in or from a plugin); remembered in settings.json.
+pub fn choose_theme(name: String, cx: &mut App) {
+    crate::app_settings::update(cx, |s| s.theme = name);
 }
 
 pub fn request_open_init(cx: &mut App) {
@@ -133,6 +131,13 @@ pub fn init(cx: &mut App) {
         notes: HashMap::new(),
         grammars: HashMap::new(),
     });
+    // The theme used to be remembered in plugins.json; it now lives in settings.json.
+    if let Some(theme) = cx.global_mut::<LuaState>().state.theme.take() {
+        if crate::app_settings::get(cx).theme == graphyne_core::settings::DEFAULT_THEME {
+            crate::app_settings::update(cx, |s| s.theme = theme);
+        }
+        save_state(cx);
+    }
     cx.spawn(async move |cx| {
         while let Ok(ev) = events.recv_async().await {
             if cx.update(|cx| handle(ev, cx)).is_err() {
@@ -258,18 +263,15 @@ fn handle(ev: FromLua, cx: &mut App) {
         FromLua::Plugins(list) => {
             let st = cx.global_mut::<LuaState>();
             st.plugins = list;
-            // The chosen theme's extension is gone or disabled: back to the built-in theme.
-            let wanted = st.state.theme.clone();
-            if crate::theme::active_theme() != wanted || wanted.is_some() {
-                crate::theme::activate_theme(wanted.as_deref());
-            }
+            // The chosen theme's extension is gone or disabled: Graphyne Dark until it is back.
+            crate::theme::activate_theme(&crate::app_settings::get(cx).theme);
             cx.refresh_windows();
         }
         FromLua::Theme(spec) => {
             let name = spec.name.clone();
             crate::theme::register_theme(spec);
-            if cx.global::<LuaState>().state.theme.as_deref() == Some(name.as_str()) {
-                crate::theme::activate_theme(Some(&name));
+            if crate::app_settings::get(cx).theme == name {
+                crate::theme::activate_theme(&name);
             }
             cx.refresh_windows();
         }

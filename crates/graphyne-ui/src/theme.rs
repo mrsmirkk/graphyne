@@ -1,4 +1,4 @@
-//! Fleet Dark palette, fonts and metrics.
+//! Graphyne Dark / Graphyne Light palettes, extension themes, fonts and metrics.
 
 use gpui::{Hsla, Pixels, Rgba, px, rgb, rgba};
 use graphyne_syntax::HighlightKind;
@@ -102,6 +102,85 @@ pub const SYNTAX_TOKENS: &[(&str, HighlightKind)] = &[
     ("module", HighlightKind::Module),
 ];
 
+/// The two built-in themes. Graphyne Dark is the palette in [`c`]; other themes map those
+/// colours to their own.
+pub const GRAPHYNE_DARK: &str = "Graphyne Dark";
+pub const GRAPHYNE_LIGHT: &str = "Graphyne Light";
+pub const BUILTIN_THEMES: [&str; 2] = [GRAPHYNE_DARK, GRAPHYNE_LIGHT];
+
+/// Graphyne Light: every Graphyne Dark colour (UI tokens and the few colours used directly
+/// in views) → its light counterpart.
+const LIGHT_UI: &[(u32, u32)] = &[
+    (c::CANVAS, 0xE6E8EC),
+    (c::ISLAND, 0xFFFFFF),
+    (c::BORDER, 0xDDE0E5),
+    (c::ACTIVE_LINE, 0xF3F6FB),
+    (c::POPUP, 0xFFFFFF),
+    (c::POPUP_BORDER, 0xD2D6DC),
+    (c::HOVER, 0xEDEFF3),
+    (c::PRESSED, 0xE1E4E9),
+    (c::TAB_ACTIVE, 0xE9ECF1),
+    (c::TAB_FOCUSED, 0xDDE8FC),
+    (c::TAB_FOCUSED_BORDER, 0x7EA6F0),
+    (c::TEXT, 0x1F2328),
+    (c::TEXT_MUTED, 0x4E5560),
+    (c::TEXT_DIM, 0x767D88),
+    (c::TEXT_FAINT, 0xA3A9B2),
+    (c::ACCENT, 0x2F6FE4),
+    (c::ACCENT_SOFT, 0xD9E6FD),
+    (c::SELECTION, 0xC6DAFB),
+    (c::SELECTION_INACTIVE, 0xE0E4EA),
+    (c::CURSOR, 0x1F2328),
+    (c::MATCH, 0x2F6FE4),
+    (c::GREEN, 0x2E9E5B),
+    (c::BLUE, 0x2F6FE4),
+    (c::RED, 0xD43B3B),
+    (c::YELLOW, 0xB07D06),
+    (c::ORANGE, 0xC4651F),
+    (c::GIT_MODIFIED, 0x2F6FE4),
+    (c::GIT_ADDED, 0x2E9E5B),
+    (c::GIT_UNTRACKED, 0xB35A35),
+    (c::GIT_DELETED, 0x8A9099),
+    // Colours used directly by views (code blocks, debugger, search badges…).
+    (0x16181B, 0xF3F4F6),
+    (0xD6D6DD, 0x1F2328),
+    (0xE3D7C2, 0x8A4B08),
+    (0x7F93B5, 0x51698F),
+    (0xEFB080, 0x00627A),
+    (0xAA9BF5, 0x871094),
+    (0xA8D8B0, 0x1E7B3A),
+    (0xE0A3A3, 0xB3261E),
+    (0xC9A3A3, 0xB3261E),
+    (0xA8CC7C, 0x4F7A1F),
+    (0x3A2F52, 0xEFE4FA),
+    (0xC5A3F0, 0x7A3EB1),
+    (0x2E3446, 0xE1E8F7),
+    (0x9BB5E8, 0x2F5DB4),
+    (0x5294F7, 0x2F6FE4),
+];
+
+/// Graphyne Light syntax colours (after IntelliJ Light).
+fn light_syntax(kind: HighlightKind) -> u32 {
+    use HighlightKind::*;
+    match kind {
+        Plain | Variable | Module => 0x1F2328,
+        Keyword => 0x0033B3,
+        String => 0x067D17,
+        Escape => 0x0037A6,
+        Number => 0x1750EB,
+        Comment => 0x8C8C8C,
+        Function | Method => 0x00627A,
+        Macro | Attribute => 0x9E880D,
+        Type | Constructor | Tag => 0x0E6E8C,
+        TypeBuiltin | ConstantBuiltin => 0x0033B3,
+        Constant | Property | VariableBuiltin => 0x871094,
+        Parameter => 0x3E5D80,
+        Label => 0x1750EB,
+        Operator => 0x3B3F45,
+        Punctuation => 0x5A606A,
+    }
+}
+
 struct ActiveTheme {
     name: String,
     ui: std::collections::HashMap<u32, u32>,
@@ -123,28 +202,47 @@ pub fn clear_themes() {
     THEMES.write().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
-/// (name, extension id) of every registered theme.
+/// (name, extension id) of every theme added by an extension (the built-in ones are
+/// [`BUILTIN_THEMES`]).
 pub fn theme_list() -> Vec<(String, Option<String>)> {
     THEMES.read().unwrap_or_else(|e| e.into_inner()).iter().map(|t| (t.name.clone(), t.plugin.clone())).collect()
 }
 
-pub fn active_theme() -> Option<String> {
-    ACTIVE_THEME.read().unwrap_or_else(|e| e.into_inner()).as_ref().map(|t| t.name.clone())
+/// Name of the theme in use.
+pub fn active_theme() -> String {
+    ACTIVE_THEME.read().unwrap_or_else(|e| e.into_inner()).as_ref().map(|t| t.name.clone()).unwrap_or_else(|| GRAPHYNE_DARK.to_string())
 }
 
-/// Switch to a registered theme (`None` = built-in Fleet Dark). Returns false when the
-/// name is not registered (the built-in theme is used then).
-pub fn activate_theme(name: Option<&str>) -> bool {
-    let themes = THEMES.read().unwrap_or_else(|e| e.into_inner());
-    let spec = name.and_then(|n| themes.iter().find(|t| t.name == n));
-    let active = spec.map(|t| ActiveTheme {
-        name: t.name.clone(),
-        ui: t.ui.iter().filter_map(|(k, v)| UI_TOKENS.iter().find(|(n, _)| n == k).map(|(_, def)| (*def, *v))).collect(),
-        syntax: t.syntax.iter().filter_map(|(k, v)| SYNTAX_TOKENS.iter().find(|(n, _)| n == k).map(|(_, kind)| (*kind, *v))).collect(),
-    });
-    let found = active.is_some() || name.is_none();
+/// Switch themes by name: a built-in one or one an extension registered. Returns false when
+/// no such theme exists (yet) — Graphyne Dark is used then.
+pub fn activate_theme(name: &str) -> bool {
+    let active = if name == GRAPHYNE_DARK {
+        None
+    } else if name == GRAPHYNE_LIGHT {
+        Some(ActiveTheme {
+            name: name.to_string(),
+            ui: LIGHT_UI.iter().copied().collect(),
+            syntax: SYNTAX_TOKENS.iter().map(|(_, kind)| (*kind, light_syntax(*kind))).collect(),
+        })
+    } else {
+        let themes = THEMES.read().unwrap_or_else(|e| e.into_inner());
+        themes.iter().find(|t| t.name == name).map(|t| ActiveTheme {
+            name: t.name.clone(),
+            ui: t.ui.iter().filter_map(|(k, v)| UI_TOKENS.iter().find(|(n, _)| n == k).map(|(_, def)| (*def, *v))).collect(),
+            syntax: t.syntax.iter().filter_map(|(k, v)| SYNTAX_TOKENS.iter().find(|(n, _)| n == k).map(|(_, kind)| (*kind, *v))).collect(),
+        })
+    };
+    let found = active.is_some() || name == GRAPHYNE_DARK;
     *ACTIVE_THEME.write().unwrap_or_else(|e| e.into_inner()) = active;
+    graphyne_terminal::set_light_palette(is_light());
     found
+}
+
+/// Whether the theme in use is light (by its editor background), for the terminal colours.
+pub fn is_light() -> bool {
+    let bg = themed(c::ISLAND);
+    let (r, g, b) = ((bg >> 16) & 0xFF, (bg >> 8) & 0xFF, bg & 0xFF);
+    (r * 299 + g * 587 + b * 114) / 1000 > 140
 }
 
 /// Built-in colour → active theme's colour.
@@ -168,7 +266,7 @@ pub fn rgba_u32(hex_rgba: u32) -> Rgba {
     rgba(hex_rgba)
 }
 
-/// Syntax colours ("Fleet Dark" pastel accents).
+/// Syntax colours (Graphyne Dark pastel accents unless the theme sets them).
 pub fn syntax(kind: HighlightKind) -> Hsla {
     use HighlightKind::*;
     if let Some(v) = ACTIVE_THEME.read().ok().and_then(|g| g.as_ref().and_then(|t| t.syntax.get(&kind).copied())) {

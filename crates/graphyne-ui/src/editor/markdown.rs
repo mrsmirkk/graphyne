@@ -66,7 +66,7 @@ fn inline(src: &str) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
                 let code: String = chars[i + 1..i + 1 + end].iter().collect();
                 push_styled(&mut out, &mut hl, &code, HighlightStyle {
                     color: Some(color(0xE3D7C2)),
-                    background_color: Some(color_a(0xFFFFFF, 0.06)),
+                    background_color: Some(color_a(c::TEXT, 0.07)),
                     ..Default::default()
                 });
                 i += end + 2;

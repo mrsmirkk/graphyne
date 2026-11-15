@@ -436,7 +436,7 @@ fn terminal_element(view: Entity<TerminalView>) -> impl IntoElement {
                     let thumb = (h * ratio).max(px(20.));
                     let pos = 1.0 - snap.display_offset as f32 / snap.history_size as f32;
                     let top = bounds.top() + (h - thumb) * pos;
-                    window.paint_quad(fill(Bounds::new(point(bounds.right() - px(8.), top), size(px(5.), thumb)), color_a(0xFFFFFF, 0.14)).corner_radii(px(2.5)));
+                    window.paint_quad(fill(Bounds::new(point(bounds.right() - px(8.), top), size(px(5.), thumb)), color_a(c::TEXT, 0.18)).corner_radii(px(2.5)));
                 }
             });
         },

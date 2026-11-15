@@ -50,6 +50,8 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
 }
 
 fn apply(s: &Settings) {
+    // A plugin theme may not be registered yet at start-up; it is activated once it is.
+    theme::activate_theme(&s.theme);
     theme::set_fonts(&s.editor_font, &s.terminal_font, &s.ui_font);
     theme::apply_setting("editor.font_size", &SettingValue::Number(s.editor_font_size as f64));
     theme::apply_setting("terminal.font_size", &SettingValue::Number(s.terminal_font_size as f64));

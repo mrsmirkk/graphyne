@@ -378,18 +378,19 @@ impl Render for SettingsPage {
 
         // Appearance
         let active_theme = theme::active_theme();
-        let mut themes = vec![(None::<String>, "Fleet Dark".to_string())];
-        themes.extend(theme::theme_list().into_iter().map(|(name, _)| (Some(name.clone()), name)));
+        let mut themes: Vec<String> = theme::BUILTIN_THEMES.iter().map(|t| t.to_string()).collect();
+        themes.extend(theme::theme_list().into_iter().map(|(name, _)| name));
         let theme_chips = themes
             .into_iter()
             .enumerate()
-            .map(|(ix, (key, name))| {
-                let selected = key == active_theme;
+            .map(|(ix, name)| {
+                let selected = name == active_theme;
+                let key = name.clone();
                 chip(("settings-theme", ix), name, selected).on_click(move |_, _, cx| lua_bridge::choose_theme(key.clone(), cx)).into_any_element()
             })
             .collect();
         let appearance = card()
-            .child(choice_row(true, "Theme", "Colour themes come from plugins (Plugins page); Fleet Dark is built in.", theme_chips))
+            .child(choice_row(true, "Theme", "Graphyne Dark and Graphyne Light are built in; plugins can add more (Plugins page).", theme_chips))
             .child(row(false, "Interface font", "Menus, panels and tabs.", self.font_dropdown(FontTarget::Interface, &s, cx)))
             .child(row(false, "Editor font", "Any font installed on this computer; monospaced ones suit code best.", self.font_dropdown(FontTarget::Editor, &s, cx)))
             .child(row(

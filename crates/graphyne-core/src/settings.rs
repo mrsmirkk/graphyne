@@ -10,6 +10,7 @@ pub const FONT_SIZES: RangeInclusive<f32> = 9.0..=32.0;
 pub const AUTOSAVE_DELAYS_MS: RangeInclusive<u64> = 100..=10_000;
 pub const DEFAULT_CODE_FONT: &str = "JetBrains Mono";
 pub const DEFAULT_UI_FONT: &str = "Inter";
+pub const DEFAULT_THEME: &str = "Graphyne Dark";
 
 /// A font name; `null` or a missing value means the default (filled in by `sanitized`).
 fn font_name<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
@@ -19,6 +20,9 @@ fn font_name<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Settings {
+    /// "Graphyne Dark", "Graphyne Light" (built in) or a theme added by a plugin.
+    #[serde(rename = "ui.theme", deserialize_with = "font_name")]
+    pub theme: String,
     #[serde(rename = "editor.font_family", deserialize_with = "font_name")]
     pub editor_font: String,
     #[serde(rename = "editor.font_size")]
@@ -51,6 +55,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            theme: DEFAULT_THEME.into(),
             editor_font: DEFAULT_CODE_FONT.into(),
             editor_font_size: 13.5,
             usage_hints: true,
@@ -77,6 +82,8 @@ impl Settings {
         self.editor_font = font(self.editor_font, DEFAULT_CODE_FONT);
         self.terminal_font = font(self.terminal_font, DEFAULT_CODE_FONT);
         self.ui_font = font(self.ui_font, DEFAULT_UI_FONT);
+        // "Fleet Dark" is the built-in dark theme's old name.
+        self.theme = if self.theme.trim() == "Fleet Dark" { DEFAULT_THEME.to_string() } else { font(self.theme, DEFAULT_THEME) };
         if self.shell.trim().is_empty() {
             self.shell = "auto".into();
         }
@@ -131,6 +138,9 @@ mod tests {
         std::fs::write(dir.join("settings.json"), r#"{ "editor.font_family": null, "ui.font_family": " " }"#).unwrap();
         let loaded = load_from(&dir);
         assert_eq!((loaded.editor_font.as_str(), loaded.terminal_font.as_str(), loaded.ui_font.as_str()), (DEFAULT_CODE_FONT, DEFAULT_CODE_FONT, DEFAULT_UI_FONT));
+        assert_eq!(loaded.theme, DEFAULT_THEME);
+        std::fs::write(dir.join("settings.json"), r#"{ "ui.theme": "Fleet Dark" }"#).unwrap();
+        assert_eq!(load_from(&dir).theme, DEFAULT_THEME);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

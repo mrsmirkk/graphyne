@@ -135,8 +135,8 @@ impl Render for PluginsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = lua_bridge::snapshot(cx);
         let active_theme = theme::active_theme();
-        let mut themes = vec![(None::<String>, "Fleet Dark".to_string(), "built-in".to_string())];
-        themes.extend(theme::theme_list().into_iter().map(|(name, plugin)| (Some(name.clone()), name, plugin.map(|p| format!("from {p}")).unwrap_or_else(|| "from init.lua".into()))));
+        let mut themes: Vec<(String, String, String)> = theme::BUILTIN_THEMES.iter().map(|t| (t.to_string(), t.to_string(), "built-in".to_string())).collect();
+        themes.extend(theme::theme_list().into_iter().map(|(name, plugin)| (name.clone(), name, plugin.map(|p| format!("from {p}")).unwrap_or_else(|| "from init.lua".into()))));
         let plugins_dir = snapshot.plugins_dir.display().to_string();
         let count = snapshot.plugins.len();
         let header = div()

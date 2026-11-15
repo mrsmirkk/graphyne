@@ -2306,7 +2306,7 @@ fn editor_element(editor: Entity<Editor>) -> impl IntoElement {
                     len,
                     font: code_font.clone(),
                     color: color(c::TEXT_DIM),
-                    background_color: Some(color_a(0xFFFFFF, 0.055)),
+                    background_color: Some(color_a(c::TEXT, 0.06)),
                     underline: None,
                     strikethrough: None,
                 };
@@ -2575,7 +2575,7 @@ fn editor_element(editor: Entity<Editor>) -> impl IntoElement {
             }
 
             if let Some(thumb) = state.scrollbar {
-                window.paint_quad(fill(thumb, color_a(0xFFFFFF, 0.10)).corner_radii(px(3.)));
+                window.paint_quad(fill(thumb, color_a(c::TEXT, 0.14)).corner_radii(px(3.)));
             }
 
             let rows: Vec<RowLayout> = state.rows.iter().map(|r| RowLayout { y: r.y, kind: r.kind.clone() }).collect();
