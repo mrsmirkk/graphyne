@@ -203,54 +203,74 @@ pub fn is_italic(kind: HighlightKind) -> bool {
 
 #[derive(Clone, Copy)]
 pub struct Fonts {
+    /// Menus, panels, tabs.
     pub ui: &'static str,
+    /// The editor.
     pub code: &'static str,
+    /// The terminal.
+    pub term: &'static str,
 }
 
-/// The code font can change at run time (Settings), hence a lock, not a `OnceLock`.
-static FONTS: std::sync::RwLock<Fonts> = std::sync::RwLock::new(Fonts { ui: "Inter", code: "JetBrains Mono" });
+/// Fonts can change at run time (Settings), hence a lock, not a `OnceLock`.
+static FONTS: std::sync::RwLock<Fonts> = std::sync::RwLock::new(Fonts { ui: "Inter", code: "JetBrains Mono", term: "JetBrains Mono" });
+/// Installed families, sorted; chosen fonts borrow their names from here.
 static INSTALLED_FONTS: OnceLock<Vec<String>> = OnceLock::new();
-/// The code font chosen automatically (Settings › Editor font › Automatic).
-static AUTO_CODE_FONT: OnceLock<&'static str> = OnceLock::new();
+/// Used when a chosen font isn't installed on this machine.
+static FALLBACK: OnceLock<(&'static str, &'static str)> = OnceLock::new();
 
-/// Monospace families offered in Settings, in order of preference.
-const CODE_FONTS: &[&str] = &[
-    "JetBrains Mono", "Cascadia Code", "Cascadia Mono", "Fira Code", "Source Code Pro", "Hack", "Iosevka",
-    "Consolas", "Menlo", "Ubuntu Mono", "DejaVu Sans Mono", "Lucida Console", "Courier New",
-];
-
-/// Resolve installed font families once (JetBrains Mono / Inter preferred).
+/// Remember the installed font families and pick fallbacks (JetBrains Mono / Inter first).
 pub fn init_fonts(available: &[String]) {
-    let has = |name: &str| available.iter().any(|f| f.eq_ignore_ascii_case(name));
+    let mut installed: Vec<String> = available.iter().filter(|f| !f.starts_with('.') && !f.trim().is_empty() && !is_symbol_font(f)).cloned().collect();
+    installed.sort_by_key(|f| f.to_lowercase());
+    installed.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    let installed = INSTALLED_FONTS.get_or_init(|| installed);
+    let has = |name: &str| installed.iter().any(|f| f.eq_ignore_ascii_case(name));
     let pick = |prefs: &[&'static str], fallback: &'static str| prefs.iter().copied().find(|p| has(p)).unwrap_or(fallback);
     let code = pick(&["JetBrains Mono", "Cascadia Mono", "Cascadia Code", "Consolas", "Menlo", "DejaVu Sans Mono"], "monospace");
     let ui = pick(&["Inter", "Inter Variable", "Segoe UI Variable Text", "Segoe UI", "SF Pro Text", "Ubuntu", "Cantarell"], ".SystemUIFont");
-    let _ = INSTALLED_FONTS.set(available.to_vec());
-    let _ = AUTO_CODE_FONT.set(code);
+    let _ = FALLBACK.set((code, ui));
     if let Ok(mut f) = FONTS.write() {
-        *f = Fonts { ui, code };
+        *f = Fonts { ui, code, term: code };
     }
 }
 
+/// Icon and symbol fonts have no letters: chosen for the interface they turn every label
+/// into boxes (and the Settings page with them), so they are not offered.
+fn is_symbol_font(name: &str) -> bool {
+    let n = name.to_lowercase();
+    ["icons", "mdl2", "emoji", "wingdings", "webdings", "marlett", "dingbats", "bookshelf symbol"].iter().any(|p| n.contains(p)) || n == "symbol"
+}
+
 pub fn fonts() -> Fonts {
-    FONTS.read().map(|f| *f).unwrap_or(Fonts { ui: "Inter", code: "JetBrains Mono" })
+    FONTS.read().map(|f| *f).unwrap_or(Fonts { ui: "Inter", code: "JetBrains Mono", term: "JetBrains Mono" })
 }
 
-/// Installed monospace families for the Settings font picker.
-pub fn code_fonts() -> Vec<&'static str> {
-    let installed = INSTALLED_FONTS.get().map(Vec::as_slice).unwrap_or(&[]);
-    CODE_FONTS.iter().copied().filter(|f| installed.iter().any(|i| i.eq_ignore_ascii_case(f))).collect()
+/// Font families installed on this computer, sorted by name.
+pub fn installed_fonts() -> &'static [String] {
+    INSTALLED_FONTS.get().map(Vec::as_slice).unwrap_or(&[])
 }
 
-/// Use `family` for code (`None`, or a font that isn't installed: the automatic choice).
-/// Returns whether the font changed.
-pub fn set_code_font(family: Option<&str>) -> bool {
-    let auto = AUTO_CODE_FONT.get().copied().unwrap_or("JetBrains Mono");
-    // Only names from the fixed list: font names become `&'static str` without leaking.
-    let code = family.and_then(|f| code_fonts().into_iter().find(|c| c.eq_ignore_ascii_case(f))).unwrap_or(auto);
+/// The installed family called `name` (any case).
+fn installed(name: &str) -> Option<&'static str> {
+    installed_fonts().iter().find(|f| f.eq_ignore_ascii_case(name)).map(String::as_str)
+}
+
+pub fn is_installed(name: &str) -> bool {
+    installed(name).is_some()
+}
+
+/// Use these families for the editor, terminal and interface; one that isn't installed
+/// falls back to the best available. Returns whether anything changed.
+pub fn set_fonts(code: &str, term: &str, ui: &str) -> bool {
+    let (code_fallback, ui_fallback) = FALLBACK.get().copied().unwrap_or(("JetBrains Mono", "Inter"));
+    let next = Fonts {
+        ui: installed(ui).unwrap_or(ui_fallback),
+        code: installed(code).unwrap_or(code_fallback),
+        term: installed(term).unwrap_or(code_fallback),
+    };
     match FONTS.write() {
-        Ok(mut f) if f.code != code => {
-            f.code = code;
+        Ok(mut f) if (f.ui, f.code, f.term) != (next.ui, next.code, next.term) => {
+            *f = next;
             true
         }
         _ => false,

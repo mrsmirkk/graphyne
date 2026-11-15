@@ -323,7 +323,7 @@ fn terminal_element(view: Entity<TerminalView>) -> impl IntoElement {
     let pre = view.clone();
     canvas(
         move |bounds, window, cx| {
-            let font = gpui::font(theme::fonts().code);
+            let font = gpui::font(theme::fonts().term);
             let font_size = px(theme::term_size());
             let text_system = window.text_system().clone();
             let font_id = text_system.resolve_font(&font);
@@ -349,7 +349,7 @@ fn terminal_element(view: Entity<TerminalView>) -> impl IntoElement {
             let focus_handle = view.read(cx).focus_handle.clone();
             window.handle_input(&focus_handle, ElementInputHandler::new(bounds, view.clone()), cx);
             let Some(p) = paint else { return };
-            let font = gpui::font(theme::fonts().code);
+            let font = gpui::font(theme::fonts().term);
             let font_size = px(theme::term_size());
             let snap = &p.snapshot;
             window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
@@ -497,7 +497,7 @@ impl Render for TerminalView {
             div()
                 .p(px(16.))
                 .text_color(color(c::RED))
-                .font_family(theme::fonts().code)
+                .font_family(theme::fonts().term)
                 .text_size(px(12.5))
                 .child(format!("Failed to start shell: {err}"))
                 .into_any_element()

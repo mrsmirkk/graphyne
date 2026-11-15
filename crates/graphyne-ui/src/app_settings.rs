@@ -50,7 +50,7 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
 }
 
 fn apply(s: &Settings) {
-    theme::set_code_font(s.editor_font.as_deref());
+    theme::set_fonts(&s.editor_font, &s.terminal_font, &s.ui_font);
     theme::apply_setting("editor.font_size", &SettingValue::Number(s.editor_font_size as f64));
     theme::apply_setting("terminal.font_size", &SettingValue::Number(s.terminal_font_size as f64));
     theme::apply_setting("editor.autosave_delay_ms", &SettingValue::Number(s.autosave_delay_ms as f64));

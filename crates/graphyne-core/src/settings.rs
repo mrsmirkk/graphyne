@@ -2,19 +2,25 @@
 //! `<state dir>/settings.json` (see [`crate::session::state_dir`]) and edited in the
 //! Settings tab. Native, not Lua: plugins add themes and languages, not core options.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::ops::RangeInclusive;
 use std::path::Path;
 
 pub const FONT_SIZES: RangeInclusive<f32> = 9.0..=32.0;
 pub const AUTOSAVE_DELAYS_MS: RangeInclusive<u64> = 100..=10_000;
+pub const DEFAULT_CODE_FONT: &str = "JetBrains Mono";
+pub const DEFAULT_UI_FONT: &str = "Inter";
+
+/// A font name; `null` or a missing value means the default (filled in by `sanitized`).
+fn font_name<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Settings {
-    /// Code font for the editor and terminal; `None` picks the best installed one.
-    #[serde(rename = "editor.font_family")]
-    pub editor_font: Option<String>,
+    #[serde(rename = "editor.font_family", deserialize_with = "font_name")]
+    pub editor_font: String,
     #[serde(rename = "editor.font_size")]
     pub editor_font_size: f32,
     /// `N usages` lines above functions and types.
@@ -27,8 +33,13 @@ pub struct Settings {
     pub autosave: bool,
     #[serde(rename = "editor.autosave_delay_ms")]
     pub autosave_delay_ms: u64,
+    #[serde(rename = "terminal.font_family", deserialize_with = "font_name")]
+    pub terminal_font: String,
     #[serde(rename = "terminal.font_size")]
     pub terminal_font_size: f32,
+    /// Font of menus, panels and tabs.
+    #[serde(rename = "ui.font_family", deserialize_with = "font_name")]
+    pub ui_font: String,
     /// "auto" or a shell id from `graphyne_terminal::available_shells`.
     #[serde(rename = "terminal.shell")]
     pub shell: String,
@@ -40,13 +51,15 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            editor_font: None,
+            editor_font: DEFAULT_CODE_FONT.into(),
             editor_font_size: 13.5,
             usage_hints: true,
             inlay_hints: true,
             autosave: true,
             autosave_delay_ms: 500,
+            terminal_font: DEFAULT_CODE_FONT.into(),
             terminal_font_size: 13.0,
+            ui_font: DEFAULT_UI_FONT.into(),
             shell: "auto".into(),
             reopen_projects: true,
         }
@@ -60,7 +73,10 @@ impl Settings {
         self.editor_font_size = size(self.editor_font_size, 13.5);
         self.terminal_font_size = size(self.terminal_font_size, 13.0);
         self.autosave_delay_ms = self.autosave_delay_ms.clamp(*AUTOSAVE_DELAYS_MS.start(), *AUTOSAVE_DELAYS_MS.end());
-        self.editor_font = self.editor_font.filter(|f| !f.trim().is_empty());
+        let font = |f: String, default: &str| if f.trim().is_empty() { default.to_string() } else { f.trim().to_string() };
+        self.editor_font = font(self.editor_font, DEFAULT_CODE_FONT);
+        self.terminal_font = font(self.terminal_font, DEFAULT_CODE_FONT);
+        self.ui_font = font(self.ui_font, DEFAULT_UI_FONT);
         if self.shell.trim().is_empty() {
             self.shell = "auto".into();
         }
@@ -104,13 +120,17 @@ mod tests {
     fn settings_round_trip_and_sanitize() {
         let dir = std::env::temp_dir().join(format!("graphyne-settings-test-{}", std::process::id()));
         assert_eq!(load_from(&dir), Settings::default());
-        let s = Settings { editor_font: Some("Consolas".into()), editor_font_size: 16., autosave: false, shell: "cmd".into(), ..Default::default() };
+        let s = Settings { editor_font: "Consolas".into(), ui_font: "Segoe UI".into(), editor_font_size: 16., autosave: false, shell: "cmd".into(), ..Default::default() };
         save_to(&dir, &s).unwrap();
         assert_eq!(load_from(&dir), s);
         // Hand edits: unknown keys ignored, missing keys default, out-of-range values clamped.
         std::fs::write(dir.join("settings.json"), r#"{ "editor.font_size": 100, "editor.autosave_delay_ms": 5, "x": 1 }"#).unwrap();
         let loaded = load_from(&dir);
         assert_eq!((loaded.editor_font_size, loaded.autosave_delay_ms, loaded.usage_hints), (32., 100, true));
+        // The first version wrote `"editor.font_family": null` for "automatic".
+        std::fs::write(dir.join("settings.json"), r#"{ "editor.font_family": null, "ui.font_family": " " }"#).unwrap();
+        let loaded = load_from(&dir);
+        assert_eq!((loaded.editor_font.as_str(), loaded.terminal_font.as_str(), loaded.ui_font.as_str()), (DEFAULT_CODE_FONT, DEFAULT_CODE_FONT, DEFAULT_UI_FONT));
         std::fs::remove_dir_all(&dir).ok();
     }
 }
