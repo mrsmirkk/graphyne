@@ -144,15 +144,9 @@ impl Render for PluginsPage {
             .items_center()
             .gap(px(10.))
             .child(icon(Icon::Puzzle, 22., color(c::ACCENT)))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .child(div().text_size(px(20.)).text_color(color(c::TEXT)).child("Plugins"))
-                    .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(theme::UI_SMALL)).text_color(color(c::TEXT_DIM)).child(format!("Folder: {plugins_dir}"))),
-            )
+            .child(div().text_size(px(20.)).text_color(color(c::TEXT)).child("Plugins"))
+            // Buttons sit right after the title; the folder itself opens in Explorer.
+            .child(div().w(px(8.)))
             .child(button("plugins-open-folder", "Open folder", false).on_click(cx.listener(|_, _, _, cx| {
                 let dir = lua_bridge::plugins_dir(cx);
                 cx.reveal_path(&dir);
