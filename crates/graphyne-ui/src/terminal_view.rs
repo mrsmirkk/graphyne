@@ -573,7 +573,9 @@ impl TerminalPanel {
     }
 
     fn add_tab(&mut self, title: SharedString, is_run: bool, cwd: PathBuf, cx: &mut Context<Self>) -> Entity<TerminalView> {
-        self.add_tab_with(title, is_run, cwd, None, Vec::new(), cx)
+        // Run tabs get commands in PowerShell syntax: they use that shell, not the user's.
+        let command = is_run.then(graphyne_terminal::run_shell);
+        self.add_tab_with(title, is_run, cwd, command, Vec::new(), cx)
     }
 
     fn add_tab_with(

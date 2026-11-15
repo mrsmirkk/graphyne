@@ -74,7 +74,14 @@ pub fn plan(file: &Path, project_root: &Path, shell: ShellKind) -> RunPlan {
         },
         LanguageId::C => pty(&name, dir, and_then(format!("gcc {f} -o {tmp_exe}"), tmp_exe.clone())),
         LanguageId::Cpp => pty(&name, dir, and_then(format!("g++ -std=c++20 {f} -o {tmp_exe}"), tmp_exe.clone())),
-        LanguageId::Python => pty(&name, dir, format!("{py} {f}")),
+        LanguageId::Python => match crate::python_env::project_python(project_root) {
+            // The project's .venv (PowerShell needs `&` to run a quoted path).
+            Some(venv) => {
+                let exe = quote(shell, &venv);
+                pty(&name, dir, if shell == ShellKind::PowerShell { format!("& {exe} {f}") } else { format!("{exe} {f}") })
+            }
+            None => pty(&name, dir, format!("{py} {f}")),
+        },
         LanguageId::Go => match find_up(file, project_root, "go.mod") {
             Some(m) => pty("go run .", m, "go run .".into()),
             None => pty(&name, dir, format!("go run {f}")),
@@ -129,6 +136,22 @@ pub fn pty_line(shell: ShellKind, cwd: &Path, command: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn python_plan_uses_the_project_venv() {
+        let root = std::env::temp_dir().join(format!("graphyne-run-venv-{}", std::process::id()));
+        let venv = root.join(".venv");
+        std::fs::create_dir_all(&venv).unwrap();
+        std::fs::write(venv.join("pyvenv.cfg"), "").unwrap();
+        let python = crate::python_env::venv_python(&venv);
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(&python, "").unwrap();
+        match plan(&root.join("main.py"), &root, ShellKind::PowerShell) {
+            RunPlan::Pty { command, .. } => assert!(command.starts_with("& ") && command.contains(".venv"), "{command}"),
+            _ => panic!("expected a terminal run"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn python_plan() {
         let root = Path::new("/p");

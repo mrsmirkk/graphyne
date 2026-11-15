@@ -69,6 +69,25 @@ enum Splitter {
     Bottom,
 }
 
+/// The project's Python environment (`.venv` with debugpy) for Run and Debug.
+#[derive(Clone, PartialEq)]
+enum PyEnv {
+    /// Not looked at yet this session.
+    Unknown,
+    /// Being checked / created; the status bar shows this text.
+    Working(SharedString),
+    Ready,
+    /// Poetry / Pipenv / conda project: its tool owns the environment.
+    Skipped,
+    Failed,
+}
+
+/// Run / Debug requests waiting for the Python environment.
+enum AfterEnv {
+    Run(PathBuf),
+    Debug(PathBuf),
+}
+
 #[derive(Clone)]
 struct Notification {
     text: SharedString,
@@ -116,6 +135,13 @@ pub struct Workspace {
     right_width: Pixels,
     bottom_height: Pixels,
     dragging: Option<Splitter>,
+    py_env: PyEnv,
+    after_env: Vec<AfterEnv>,
+    /// Compilers / runtimes Run needs that aren't installed (status bar, messages).
+    missing_tools: HashMap<LanguageId, graphyne_core::toolchain::MissingTool>,
+    /// Languages already checked for a missing compiler this session.
+    checked_tools: HashSet<LanguageId>,
+    window_handle: gpui::AnyWindowHandle,
     _watcher: Option<notify::RecommendedWatcher>,
     _subs: Vec<Subscription>,
 }
@@ -271,6 +297,11 @@ impl Workspace {
             right_width: px(300.),
             bottom_height: px(260.),
             dragging: None,
+            py_env: PyEnv::Unknown,
+            after_env: Vec::new(),
+            missing_tools: HashMap::new(),
+            checked_tools: HashSet::new(),
+            window_handle: window.window_handle(),
             _watcher: None,
             _subs: subs,
         };
@@ -513,6 +544,25 @@ impl Workspace {
                 d.update(cx, |d, cx| d.refresh(cx));
             }
         }
+        if !files.is_empty() && !self.indexing {
+            // Files that weren't in the project before: get Python ready, check compilers.
+            let new_files: Vec<PathBuf> = files
+                .iter()
+                .filter(|p| p.is_file())
+                .filter(|p| {
+                    let rel = p.strip_prefix(&self.root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+                    !rel.is_empty() && self.files.binary_search_by(|f| f.as_str().cmp(rel.as_str())).is_err()
+                })
+                .cloned()
+                .collect();
+            for file in new_files {
+                let lang = LanguageId::from_path(&file);
+                if lang == LanguageId::Python && matches!(self.py_env, PyEnv::Unknown | PyEnv::Failed) && crate::app_settings::get(cx).python_auto_env {
+                    self.start_python_env(cx);
+                }
+                self.check_run_tool(lang, file, cx);
+            }
+        }
         if !files.is_empty() {
             self.file_tree.update(cx, |t, cx| t.refresh(cx));
             self.index_files(cx);
@@ -594,6 +644,9 @@ impl Workspace {
     fn probe_active_toolchain(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.pane.read(cx).active_editor() else { return };
         let lang = editor.read(cx).language;
+        if let Some(path) = editor.read(cx).path.clone() {
+            self.check_run_tool(lang, path, cx);
+        }
         if lang.info().toolchain.is_none() || self.toolchains.contains_key(&lang) || !self.probing.insert(lang) {
             return;
         }
@@ -608,8 +661,129 @@ impl Workspace {
         .detach();
     }
 
+    /// Once per language and session: is the compiler / runtime Run needs installed? If not,
+    /// say what to install (notification + status bar).
+    fn check_run_tool(&mut self, lang: LanguageId, file: PathBuf, cx: &mut Context<Self>) {
+        if graphyne_core::toolchain::run_program(lang, &file, &self.root).is_none() || !self.checked_tools.insert(lang) {
+            return;
+        }
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let missing = cx.background_spawn(async move { graphyne_core::toolchain::missing_for_run(lang, &file, &root) }).await;
+            this.update(cx, |this, cx| {
+                if let Some(m) = missing {
+                    this.notify_user(m.message(lang), true, cx);
+                    this.missing_tools.insert(lang, m);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Python projects get a `.venv` with debugpy before Run / Debug. Returns whether that
+    /// is ready (or not wanted); otherwise set-up is under way and the caller should wait.
+    fn ensure_python_env(&mut self, cx: &mut Context<Self>) -> bool {
+        if !crate::app_settings::get(cx).python_auto_env {
+            return true;
+        }
+        match self.py_env {
+            PyEnv::Ready | PyEnv::Skipped => true,
+            PyEnv::Working(_) => false,
+            PyEnv::Unknown | PyEnv::Failed => {
+                self.start_python_env(cx);
+                false
+            }
+        }
+    }
+
+    fn start_python_env(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.py_env, PyEnv::Working(_)) {
+            return;
+        }
+        self.py_env = PyEnv::Working("Python: checking the environment…".into());
+        cx.notify();
+        let root = self.root.clone();
+        let (tx, rx) = flume::unbounded::<graphyne_core::python_env::Step>();
+        cx.spawn(async move |this, cx| {
+            while let Ok(step) = rx.recv_async().await {
+                let text = match step {
+                    graphyne_core::python_env::Step::CreatingVenv => "Python: creating .venv…",
+                    graphyne_core::python_env::Step::InstallingDebugpy => "Python: installing debugpy…",
+                };
+                let still = this.update(cx, |this, cx| {
+                    if matches!(this.py_env, PyEnv::Working(_)) {
+                        this.py_env = PyEnv::Working(text.into());
+                        cx.notify();
+                    }
+                });
+                if still.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let handle = self.window_handle;
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move { graphyne_core::python_env::ensure(&root, |step| drop(tx.send(step))) }).await;
+            cx.update(|cx| {
+                handle
+                    .update(cx, |_, window, cx| {
+                        this.update(cx, |this, cx| this.finish_python_env(result, window, cx)).ok();
+                    })
+                    .ok();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn finish_python_env(&mut self, result: Result<graphyne_core::python_env::Outcome, String>, window: &mut Window, cx: &mut Context<Self>) {
+        use graphyne_core::python_env::Outcome;
+        match result {
+            Ok(Outcome::Ready { created_venv, installed_debugpy, .. }) => {
+                self.py_env = PyEnv::Ready;
+                if created_venv || installed_debugpy {
+                    let done = if created_venv { "created .venv and installed debugpy" } else { "installed debugpy into the project's environment" };
+                    self.notify_user(format!("Python: {done}. Run and Debug use it."), false, cx);
+                    // Language servers re-read `python.pythonPath` (now the .venv).
+                    if let Some(client) = self.lsp_store.read(cx).client_for(LanguageId::Python) {
+                        client.notify("workspace/didChangeConfiguration", serde_json::json!({ "settings": {} }));
+                    }
+                    self.file_tree.update(cx, |t, cx| t.refresh(cx));
+                }
+            }
+            Ok(Outcome::ManagedElsewhere(file)) => {
+                self.py_env = PyEnv::Skipped;
+                let tool = match file {
+                    "poetry.lock" => "Poetry",
+                    "Pipfile" => "Pipenv",
+                    _ => "conda",
+                };
+                self.notify_user(format!("This project's Python environment is managed by {tool} ({file}); Graphyne leaves it to {tool}."), false, cx);
+            }
+            Err(e) => {
+                self.py_env = PyEnv::Failed;
+                self.notify_user(format!("Python environment: {e}"), true, cx);
+                self.show_notifications = true;
+                self.unread = false;
+            }
+        }
+        for action in std::mem::take(&mut self.after_env) {
+            match action {
+                AfterEnv::Run(path) => self.run_file(path, window, cx),
+                AfterEnv::Debug(path) => self.debug_file(path, window, cx),
+            }
+        }
+        cx.notify();
+    }
+
     pub(crate) fn notify_user(&mut self, text: impl Into<SharedString>, error: bool, cx: &mut Context<Self>) {
-        self.notifications.insert(0, Notification { text: text.into(), error });
+        let text = text.into();
+        // The same message again (e.g. Run after the warning on opening the file): keep one.
+        self.notifications.retain(|n| n.text != text);
+        self.notifications.insert(0, Notification { text, error });
         self.notifications.truncate(30);
         self.unread = true;
         cx.notify();
@@ -705,6 +879,14 @@ impl Workspace {
             self.notify_user("Open a file to debug it", true, cx);
             return;
         };
+        if LanguageId::from_path(&path) == LanguageId::Python && !self.ensure_python_env(cx) {
+            self.after_env.push(AfterEnv::Debug(path));
+            return;
+        }
+        self.debug_file(path, window, cx);
+    }
+
+    fn debug_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let saves = self.pane.update(cx, |p, cx| p.save_all(cx));
         let debugger = self.debugger.clone();
         cx.spawn_in(window, async move |_, cx| {
@@ -838,6 +1020,39 @@ impl Workspace {
             return;
         };
         let Some(path) = editor.read(cx).path.clone() else { return };
+        if LanguageId::from_path(&path) == LanguageId::Python && !self.ensure_python_env(cx) {
+            self.after_env.push(AfterEnv::Run(path));
+            return;
+        }
+        self.run_file(path, window, cx);
+    }
+
+    /// Run `path` unless its compiler / runtime is missing (then say what to install).
+    fn run_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let lang = LanguageId::from_path(&path);
+        let root = self.root.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let file = path.clone();
+            let missing = cx.background_spawn(async move { graphyne_core::toolchain::missing_for_run(lang, &file, &root) }).await;
+            this.update_in(cx, |this, window, cx| match missing {
+                Some(m) => {
+                    this.notify_user(m.message(lang), true, cx);
+                    this.missing_tools.insert(lang, m);
+                    this.show_notifications = true;
+                    this.unread = false;
+                    cx.notify();
+                }
+                None => {
+                    this.missing_tools.remove(&lang);
+                    this.launch_run(path, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn launch_run(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let saves = self.pane.update(cx, |p, cx| p.save_all(cx));
         let shell = ShellKind::native();
         match graphyne_core::run::plan(&path, &self.root, shell) {
@@ -1396,8 +1611,33 @@ impl Workspace {
                 right.push(div().child(e.buffer.line_ending().label()).into_any_element());
                 right.push(div().child("UTF-8").into_any_element());
                 let lang = e.language;
-                let toolchain = self.toolchains.get(&lang).cloned().flatten();
-                right.push(div().child(toolchain.unwrap_or_else(|| lang.name().into())).into_any_element());
+                match self.missing_tools.get(&lang) {
+                    Some(m) => {
+                        let hint: SharedString = m.message(lang).into();
+                        right.push(
+                            div()
+                                .id("missing-tool")
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .cursor_pointer()
+                                .text_color(color(c::YELLOW))
+                                .child(icon(Icon::Warning, 12., color(c::YELLOW)))
+                                .child(format!("{} not found", m.program))
+                                .tooltip(tooltip(hint, None))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_notifications = true;
+                                    this.unread = false;
+                                    cx.notify();
+                                }))
+                                .into_any_element(),
+                        );
+                    }
+                    None => {
+                        let toolchain = self.toolchains.get(&lang).cloned().flatten();
+                        right.push(div().child(toolchain.unwrap_or_else(|| lang.name().into())).into_any_element());
+                    }
+                }
             }
             Some(PaneItem::Plugins(_)) => {
                 crumbs.push("Plugins".into());
@@ -1426,6 +1666,9 @@ impl Workspace {
                 right.push(div().child("Binary").into_any_element());
             }
             None => {}
+        }
+        if let PyEnv::Working(text) = &self.py_env {
+            right.insert(0, div().flex().items_center().gap(px(5.)).text_color(color(c::ACCENT)).child(icon(Icon::Refresh, 12., color(c::ACCENT))).child(text.clone()).into_any_element());
         }
         let n = crumbs.len();
         div()
@@ -1793,7 +2036,7 @@ impl Workspace {
                         .rounded(px(6.))
                         .hover(|s| s.bg(color(c::HOVER)))
                         .child(icon(if n.error { Icon::Warning } else { Icon::Bell }, 14., if n.error { color(c::YELLOW) } else { color(c::TEXT_MUTED) }))
-                        .child(div().flex_1().text_color(color(c::TEXT)).child(n.text))
+                        .child(div().flex_1().min_w(px(0.)).text_color(color(c::TEXT)).child(n.text))
                 })),
         )
     }

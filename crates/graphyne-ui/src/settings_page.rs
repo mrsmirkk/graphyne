@@ -435,6 +435,14 @@ impl Render for SettingsPage {
             ))
             .child(choice_row(false, "Shell", "Used for new terminal tabs. Automatic: PowerShell 7 if installed, else Windows PowerShell.", shell_chips));
 
+        // Run & Debug
+        let run_debug = card().child(row(
+            true,
+            "Prepare Python projects",
+            "Create .venv with debugpy when a Python file is added or run, so Run and Debug just work.",
+            toggle("settings-python-env", s.python_auto_env, |s, v| s.python_auto_env = v),
+        ));
+
         // Startup
         let startup = card().child(row(
             true,
@@ -489,6 +497,8 @@ impl Render for SettingsPage {
                     .child(editor)
                     .child(section("TERMINAL"))
                     .child(terminal)
+                    .child(section("RUN & DEBUG"))
+                    .child(run_debug)
                     .child(section("STARTUP"))
                     .child(startup)
                     .child(div().pt(px(18.)).text_size(px(11.5)).text_color(color(c::TEXT_FAINT)).child(format!("Changes apply at once and are saved to {file}"))),

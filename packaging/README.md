@@ -25,8 +25,10 @@
   `rust-analyzer`, `pyright-langserver` (или `basedpyright`, `pylsp`), `gopls`, `clangd`,
   `vtsls` / `typescript-language-server`, `lua-language-server` и т.д. Без сервера работают
   подсветка синтаксиса и автодополнение по словам из файла.
-- **Отладка Python** — `debugpy` (`python -m pip install debugpy`) или путь к папке с ним
-  в переменной окружения `GRAPHYNE_DEBUGPY_PATH`.
+- **Python** — достаточно установленного Python 3: когда в проекте появляется `.py`-файл (или при
+  первом Run / Debug), Graphyne сам создаёт `.venv` и ставит туда `debugpy`; Run, Debug и pyright
+  используют этот `.venv`. Проекты Poetry / Pipenv / conda не трогает. Выключается в Settings →
+  Run & Debug.
 - **Отладка Rust / C / C++ / Go** — `lldb-dap` или CodeLLDB, `gdb` ≥ 14, `dlv` (не проверено).
 
 ## Горячие клавиши
@@ -63,6 +65,8 @@
 - Отладчик DAP: условные точки останова и logpoint'ы, точки сохраняются в
   `.graphyne/breakpoints.json` проекта, ввод в программу во вкладке терминала.
 - Встроенный терминал с выносом в отдельное окно.
+- Если для языка не установлен компилятор или среда (gcc/g++, rustc, JDK, Go, Node.js…),
+  Graphyne говорит об этом при открытии файла и вместо запуска — что и откуда поставить.
 - Run для HTML/CSS: локальный сервер на 127.0.0.1, страница сама обновляется после
   каждого сохранения. Стрелка рядом с ▷ — пресеты аудита (cargo audit, clippy, nmap,
   gobuster, valgrind, strace, gdb), каждый в своей вкладке терминала.

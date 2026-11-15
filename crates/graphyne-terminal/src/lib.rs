@@ -288,6 +288,16 @@ pub fn default_shell() -> (String, Vec<String>) {
     if let Some(cmd) = preferred.as_deref().and_then(shell_command) {
         return cmd;
     }
+    platform_shell()
+}
+
+/// The shell Run commands are written for (PowerShell on Windows), whatever shell the
+/// user picked for terminal tabs.
+pub fn run_shell() -> (String, Vec<String>) {
+    platform_shell()
+}
+
+fn platform_shell() -> (String, Vec<String>) {
     #[cfg(windows)]
     {
         if in_path("pwsh.exe") {

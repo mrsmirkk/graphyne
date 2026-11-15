@@ -43,7 +43,7 @@ pub fn resolve(file: &Path, root: &Path) -> Result<Resolved, String> {
     let dir = file.parent().unwrap_or(root).to_path_buf();
     let title = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     match lang {
-        LanguageId::Python => python(file, &dir, &title),
+        LanguageId::Python => python(file, &dir, &title, root),
         LanguageId::Rust => rust(file, root, &title),
         LanguageId::C | LanguageId::Cpp => native(file, &dir, &title, lang),
         LanguageId::Go => go(file, &dir, &title),
@@ -51,8 +51,12 @@ pub fn resolve(file: &Path, root: &Path) -> Result<Resolved, String> {
     }
 }
 
-fn python(file: &Path, dir: &Path, title: &str) -> Result<Resolved, String> {
-    let python = which(if cfg!(windows) { "python" } else { "python3" }).or_else(|| which("python")).ok_or("Python interpreter not found on PATH")?;
+fn python(file: &Path, dir: &Path, title: &str, root: &Path) -> Result<Resolved, String> {
+    // The project's .venv first (Graphyne sets it up with debugpy), then the system Python.
+    let python = graphyne_core::python_env::project_python(root)
+        .or_else(|| which(if cfg!(windows) { "python" } else { "python3" }))
+        .or_else(|| which("python"))
+        .ok_or("Python interpreter not found on PATH")?;
     let mut env = Vec::new();
     // Explicit location (e.g. an isolated `pip install --target` folder) wins.
     if let Some(extra) = std::env::var_os("GRAPHYNE_DEBUGPY_PATH") {

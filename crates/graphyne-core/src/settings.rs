@@ -47,6 +47,10 @@ pub struct Settings {
     /// "auto" or a shell id from `graphyne_terminal::available_shells`.
     #[serde(rename = "terminal.shell")]
     pub shell: String,
+    /// Prepare Python projects for Run and Debug: `.venv` with debugpy, created when a
+    /// Python file is added or run.
+    #[serde(rename = "python.auto_environment")]
+    pub python_auto_env: bool,
     /// Reopen the last session's projects on launch (off: always the Welcome screen).
     #[serde(rename = "startup.reopen_projects")]
     pub reopen_projects: bool,
@@ -67,6 +71,7 @@ impl Default for Settings {
             ui_font: DEFAULT_UI_FONT.into(),
             shell: "auto".into(),
             reopen_projects: true,
+            python_auto_env: true,
         }
     }
 }

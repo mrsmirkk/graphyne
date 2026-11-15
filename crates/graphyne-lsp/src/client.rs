@@ -143,8 +143,18 @@ impl LspClient {
                             let params = msg.get("params").cloned().unwrap_or(Value::Null);
                             let result = match method.as_str() {
                                 "workspace/configuration" => {
-                                    let n = params.get("items").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
-                                    Some(Value::Array(vec![Value::Null; n]))
+                                    // Python servers ask for section "python": point them at the project's .venv.
+                                    let items = params.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+                                    let venv = graphyne_core::python_env::project_python(&root);
+                                    Some(Value::Array(
+                                        items
+                                            .iter()
+                                            .map(|item| match (item.get("section").and_then(Value::as_str), &venv) {
+                                                (Some("python"), Some(python)) => json!({ "pythonPath": python }),
+                                                _ => Value::Null,
+                                            })
+                                            .collect(),
+                                    ))
                                 }
                                 "workspace/workspaceFolders" => Some(json!([{ "uri": path_to_uri(&root), "name": crate::convert::path_key(&root) }])),
                                 "workspace/applyEdit" => {
