@@ -1,0 +1,14 @@
+[package]
+name = "graphyne-terminal"
+description = "Graphyne terminal engine: PTY + VT parser state, independent from any view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+flume.workspace = true
+portable-pty.workspace = true
+alacritty_terminal.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "graphyne-lsp"
+description = "Graphyne LSP client: JSON-RPC over stdio, server discovery, protocol conversions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+graphyne-core.workspace = true
+anyhow.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+flume.workspace = true
+ropey.workspace = true
+lsp-types.workspace = true
+serde_json.workspace = true
+dirs.workspace = true

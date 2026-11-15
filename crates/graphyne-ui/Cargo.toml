@@ -1,0 +1,27 @@
+[package]
+name = "graphyne-ui"
+description = "Graphyne GPUI front-end: Fleet-style island workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+graphyne-core.workspace = true
+graphyne-syntax.workspace = true
+graphyne-terminal.workspace = true
+graphyne-git.workspace = true
+graphyne-lsp.workspace = true
+graphyne-dap.workspace = true
+serde_json.workspace = true
+gpui.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+parking_lot.workspace = true
+flume.workspace = true
+smallvec.workspace = true
+ropey.workspace = true
+unicode-segmentation.workspace = true
+memmap2.workspace = true
+regex.workspace = true
+notify.workspace = true

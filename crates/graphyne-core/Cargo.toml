@@ -1,0 +1,18 @@
+[package]
+name = "graphyne-core"
+description = "Graphyne core: rope buffers, languages, project model, fuzzy ranking, secrets guard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+ropey.workspace = true
+unicode-segmentation.workspace = true
+nucleo.workspace = true
+regex.workspace = true
+ignore.workspace = true
+dirs.workspace = true
+memmap2.workspace = true
+serde_json.workspace = true
