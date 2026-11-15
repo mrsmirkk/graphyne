@@ -9,6 +9,7 @@ members = [
     "crates/graphyne-lsp",
     "crates/graphyne-dap",
     "crates/graphyne-ui",
+    "crates/graphyne-lua",
 ]
 default-members = ["crates/graphyne"]
 
@@ -26,6 +27,7 @@ graphyne-git = { path = "crates/graphyne-git" }
 graphyne-lsp = { path = "crates/graphyne-lsp" }
 graphyne-dap = { path = "crates/graphyne-dap" }
 graphyne-ui = { path = "crates/graphyne-ui" }
+graphyne-lua = { path = "crates/graphyne-lua" }
 
 gpui = "0.2.2"
 anyhow = "1"

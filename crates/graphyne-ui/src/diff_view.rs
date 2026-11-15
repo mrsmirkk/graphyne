@@ -376,7 +376,7 @@ fn line_cell(cell: Cell<'_>) -> impl IntoElement {
 impl Render for DiffView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let font_id = window.text_system().resolve_font(&gpui::font(theme::fonts().code));
-        self.char_w = window.text_system().advance(font_id, px(theme::CODE_SIZE), 'm').map(|s| f32::from(s.width)).unwrap_or(8.);
+        self.char_w = window.text_system().advance(font_id, px(theme::code_size()), 'm').map(|s| f32::from(s.width)).unwrap_or(8.);
         let header_label = |t: &'static str, indent: f32| div().flex_1().pl(px(indent)).text_color(color(c::TEXT_DIM)).child(t);
         let (added, removed) = self.data.as_ref().map(|d| (d.added, d.removed)).unwrap_or_default();
         let excluded = self.excluded_set();
@@ -483,7 +483,7 @@ impl Render for DiffView {
             .flex()
             .flex_col()
             .font_family(theme::fonts().code)
-            .text_size(px(theme::CODE_SIZE))
+            .text_size(px(theme::code_size()))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(header.font_family(theme::fonts().ui))
             .child(body)

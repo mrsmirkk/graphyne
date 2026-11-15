@@ -104,7 +104,7 @@ pub mod terminal {
 }
 
 /// Platform "primary" modifier: cmd on macOS, ctrl elsewhere.
-fn m(keys: &str) -> String {
+pub(crate) fn m(keys: &str) -> String {
     if cfg!(target_os = "macos") { keys.replace("mod-", "cmd-") } else { keys.replace("mod-", "ctrl-") }
 }
 

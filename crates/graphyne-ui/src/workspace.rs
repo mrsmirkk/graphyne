@@ -1,4 +1,4 @@
-//! The root window view: Fleet island layout.
+﻿//! The root window view: Fleet island layout.
 //!
 //! ```text
 //! title bar (CSD)
@@ -8,7 +8,7 @@
 
 use crate::actions::*;
 use crate::assets::Icon;
-use crate::components::{header_tab, icon, icon_button, island, island_header, tooltip, vsep};
+use crate::components::{header_tab, icon, icon_button, island, island_header, small_icon_button, tooltip, vsep};
 use crate::editor_pane::{EditorPane, PaneEvent, PaneItem};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::panels::{FindPanel, GitPanel, HistoryPanel, PanelEvent};
@@ -34,6 +34,8 @@ enum Menu {
     Projects,
     Run,
     App,
+    /// "+" in the left panel: init.lua, plugins folder, plugin tabs.
+    Plugins,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -42,12 +44,15 @@ enum LeftTab {
     Search,
     Git,
     History,
+    /// A tab registered by a Lua plugin (`graphyne.ui.register_tab`).
+    Plugin(u64),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RightTab {
     Structure,
     Secrets,
+    Plugin(u64),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -214,6 +219,7 @@ impl Workspace {
         // FocusLost auto-save + refresh on re-activation.
         subs.push(cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
+                crate::lua_bridge::set_active(cx.entity().downgrade(), window.window_handle(), cx);
                 this.refresh_project(cx);
             } else {
                 let tasks = this.pane.update(cx, |p, cx| p.save_all(cx));
@@ -259,13 +265,14 @@ impl Workspace {
             live_server: None,
             last_shift: None,
             shift_down: false,
-            left_width: px(270.),
+            left_width: px(300.),
             right_width: px(300.),
             bottom_height: px(260.),
             dragging: None,
             _watcher: None,
             _subs: subs,
         };
+        crate::lua_bridge::register(cx.entity().downgrade(), window.window_handle(), cx);
         ws.index_project(cx);
         ws.start_watcher(cx);
         ws.terminal.update(cx, |t, cx| t.ensure_terminal(cx));
@@ -481,7 +488,7 @@ impl Workspace {
         .detach();
     }
 
-    fn notify_user(&mut self, text: impl Into<SharedString>, error: bool, cx: &mut Context<Self>) {
+    pub(crate) fn notify_user(&mut self, text: impl Into<SharedString>, error: bool, cx: &mut Context<Self>) {
         self.notifications.insert(0, Notification { text: text.into(), error });
         self.notifications.truncate(30);
         self.unread = true;
@@ -769,7 +776,7 @@ impl Workspace {
                 })
                 .detach();
             }
-            RunPlan::Sql { .. } => self.notify_user("SQL execution → DataGrid requires a database connection (planned: sqlx pools)", true, cx),
+            RunPlan::Sql { .. } => self.notify_user("SQL execution â†’ DataGrid requires a database connection (planned: sqlx pools)", true, cx),
             RunPlan::Unsupported { reason } => self.notify_user(reason, true, cx),
         }
         cx.notify();
@@ -794,7 +801,7 @@ impl Workspace {
             cx.notify();
         });
         let weak = cx.entity().downgrade();
-        let title: SharedString = format!("Terminal — {}", self.project_name).into();
+        let title: SharedString = format!("Terminal â€” {}", self.project_name).into();
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions { title: Some(title.clone()), appears_transparent: true, traffic_light_position: Some(point(px(12.), px(12.))) }),
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(980.), px(600.)), cx))),
@@ -1060,7 +1067,8 @@ impl Workspace {
             || self.git.focus_handle(cx).contains_focused(window, cx);
         let tab = self.left_tab;
         let tabs = [(LeftTab::Files, "Files"), (LeftTab::Search, "Search"), (LeftTab::Git, "Git"), (LeftTab::History, "History")];
-        let mut header = island_header();
+        // Tabs scroll sideways when plugins add more than fit; "+" stays visible.
+        let mut header = div().id("left-tabs").flex().flex_1().min_w(px(0.)).items_center().gap(px(2.)).overflow_x_scroll();
         for (t, label) in tabs {
             header = header.child(header_tab(SharedString::from(format!("left-{label}")), label, t == tab, focused).on_click(cx.listener(move |this, _, window, cx| {
                 this.left_tab = t;
@@ -1068,16 +1076,30 @@ impl Workspace {
                     LeftTab::Search => window.focus(&this.find.focus_handle(cx)),
                     LeftTab::History => this.history.update(cx, |h, cx| h.refresh(cx)),
                     LeftTab::Git => this.git.update(cx, |g, cx| g.refresh(cx)),
-                    LeftTab::Files => {}
+                    LeftTab::Files | LeftTab::Plugin(_) => {}
                 }
                 cx.notify();
             })));
         }
+        for tab in crate::lua_bridge::tabs(cx).into_iter().filter(|t| t.side == graphyne_lua::Side::Left) {
+            let id = tab.id;
+            header = header.child(header_tab(SharedString::from(format!("left-plugin-{id}")), tab.title.clone(), self.left_tab == LeftTab::Plugin(id), focused).on_click(cx.listener(move |this, _, _, cx| {
+                this.left_tab = LeftTab::Plugin(id);
+                crate::lua_bridge::send(graphyne_lua::ToLua::TabRefresh { tab: id }, cx);
+                cx.notify();
+            })));
+        }
+        let header = island_header().child(header).child(
+            small_icon_button("left-add", Icon::Plus, if self.menu == Some(Menu::Plugins) { color(c::TEXT) } else { color(c::TEXT_DIM) })
+                .tooltip(tooltip("Plugins & init.lua", None))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Plugins, cx))),
+        );
         let body: AnyElement = match tab {
             LeftTab::Files => self.file_tree.clone().into_any_element(),
             LeftTab::Search => self.find.clone().into_any_element(),
             LeftTab::Git => self.git.clone().into_any_element(),
             LeftTab::History => self.history.clone().into_any_element(),
+            LeftTab::Plugin(id) => self.render_plugin_tab(id, cx),
         };
         island().w(self.left_width).h_full().flex_none().child(header).child(div().flex_1().min_h(px(0.)).child(body))
     }
@@ -1092,7 +1114,16 @@ impl Workspace {
                 cx.notify();
             })));
         }
+        for plugin in crate::lua_bridge::tabs(cx).into_iter().filter(|t| t.side == graphyne_lua::Side::Right) {
+            let id = plugin.id;
+            header = header.child(header_tab(SharedString::from(format!("right-plugin-{id}")), plugin.title.clone(), tab == RightTab::Plugin(id), false).on_click(cx.listener(move |this, _, _, cx| {
+                this.right_tab = RightTab::Plugin(id);
+                crate::lua_bridge::send(graphyne_lua::ToLua::TabRefresh { tab: id }, cx);
+                cx.notify();
+            })));
+        }
         let body: AnyElement = match (tab, editor) {
+            (RightTab::Plugin(id), _) => self.render_plugin_tab(id, cx),
             (_, None) => div().p(px(16.)).text_color(color(c::TEXT_DIM)).child("No file open").into_any_element(),
             (RightTab::Structure, Some(editor)) => {
                 let outline = editor.read(cx).outline.clone();
@@ -1169,7 +1200,7 @@ impl Workspace {
                                 .hover(|s| s.bg(color_a(c::YELLOW, 0.12)))
                                 .on_click(move |_, window, cx| editor.update(cx, |e, cx| e.go_to(row, col, window, cx)))
                                 .child(div().flex().items_center().gap(px(6.)).text_color(color(c::YELLOW)).child(icon(Icon::Warning, 13., color(c::YELLOW))).child(f.kind))
-                                .child(div().text_size(px(12.)).text_color(color(c::TEXT_MUTED)).child(format!("line {} · {}", row + 1, f.preview)))
+                                .child(div().text_size(px(12.)).text_color(color(c::TEXT_MUTED)).child(format!("line {} Â· {}", row + 1, f.preview)))
                         }))
                         .into_any_element()
                 }
@@ -1294,6 +1325,85 @@ impl Workspace {
             .children(right)
     }
 
+    // ---------------------------------------------------------------- Lua plugins
+
+    /// Snapshot of the project and active editor for a Lua callback.
+    fn lua_context(&self, cx: &App) -> graphyne_lua::EditorContext {
+        let mut ctx = graphyne_lua::EditorContext { project_root: self.root.to_string_lossy().to_string(), ..Default::default() };
+        if let Some(editor) = self.pane.read(cx).active_editor() {
+            editor.read(cx).lua_context(&mut ctx);
+        }
+        ctx
+    }
+
+    fn lua_key(&mut self, action: &crate::lua_bridge::LuaKey, window: &mut Window, cx: &mut Context<Self>) {
+        crate::lua_bridge::set_active(cx.entity().downgrade(), window.window_handle(), cx);
+        let ctx = self.lua_context(cx);
+        crate::lua_bridge::send(graphyne_lua::ToLua::Key { id: action.id, ctx }, cx);
+    }
+
+    /// `graphyne.terminal.run`: the command runs in the named tab (or "Lua").
+    pub fn run_lua_command(&mut self, command: &str, tab: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.detached.is_none() {
+            self.bottom = true;
+        }
+        self.bottom_view = BottomView::Terminal;
+        let label = tab.unwrap_or("Lua").to_string();
+        let line = format!("{command}\r");
+        let cwd = self.root.clone();
+        self.terminal.update(cx, |t, cx| t.run_in_tab(&label, cwd, &line, cx));
+        self.terminal.read(cx).focus_active(window, cx);
+        cx.notify();
+    }
+
+    pub fn apply_lua_edit(&mut self, edit: graphyne_lua::BufferEdit, cx: &mut Context<Self>) {
+        match self.pane.read(cx).active_editor() {
+            Some(editor) => editor.update(cx, |e, cx| e.lua_edit(edit, cx)),
+            None => self.notify_user("Lua: no file is open to edit", true, cx),
+        }
+    }
+
+    pub fn open_from_lua(&mut self, path: &str, line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let p = PathBuf::from(path);
+        let p = if p.is_absolute() { p } else { self.root.join(p) };
+        self.open_file(p, line.map(|l| (l.saturating_sub(1), 0)), window, cx);
+    }
+
+    fn render_plugin_tab(&self, id: u64, cx: &mut Context<Self>) -> AnyElement {
+        let Some(tab) = crate::lua_bridge::tabs(cx).into_iter().find(|t| t.id == id) else {
+            return div().p(px(16.)).text_color(color(c::TEXT_DIM)).child("This plugin tab is gone (init.lua was reloaded)").into_any_element();
+        };
+        div()
+            .id(SharedString::from(format!("plugin-tab-{id}")))
+            .size_full()
+            .overflow_y_scroll()
+            .py(px(4.))
+            .when(tab.items.is_empty(), |d| d.child(div().p(px(12.)).text_color(color(c::TEXT_DIM)).child("Empty")))
+            .children(tab.items.into_iter().enumerate().map(|(ix, item)| {
+                let clickable = item.clickable;
+                div()
+                    .id(ix)
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .min_h(px(24.))
+                    .py(px(3.))
+                    .mx(px(4.))
+                    .px(px(8.))
+                    .rounded(px(5.))
+                    .when(clickable, |d| {
+                        d.cursor_pointer().hover(|s| s.bg(color(c::HOVER))).on_click(cx.listener(move |this, _, window, cx| {
+                            crate::lua_bridge::set_active(cx.entity().downgrade(), window.window_handle(), cx);
+                            let ctx = this.lua_context(cx);
+                            crate::lua_bridge::send(graphyne_lua::ToLua::TabClick { tab: id, item: ix, ctx }, cx);
+                        }))
+                    })
+                    .child(div().text_color(color(c::TEXT)).child(item.text))
+                    .when_some(item.detail, |d, detail| d.child(div().text_size(px(11.5)).text_color(color(c::TEXT_DIM)).child(detail)))
+            }))
+            .into_any_element()
+    }
+
     fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
         self.show_notifications = false;
         self.menu = if self.menu == Some(menu) { None } else { Some(menu) };
@@ -1356,7 +1466,7 @@ impl Workspace {
                 .when_some(shortcut, |d, s| d.child(div().text_size(px(11.5)).text_color(color(c::TEXT_DIM)).child(s)))
         };
         let section = |label: &'static str| div().px(px(10.)).pt(px(8.)).pb(px(2.)).text_size(px(11.)).text_color(color(c::TEXT_FAINT)).child(label);
-        let open_folder = item("menu-open", "Open Folder…".into(), None, None).on_click(cx.listener(|this, _, _, cx| {
+        let open_folder = item("menu-open", "Open Folderâ€¦".into(), None, None).on_click(cx.listener(|this, _, _, cx| {
             this.menu = None;
             crate::prompt_open_folder(cx);
             cx.notify();
@@ -1408,12 +1518,12 @@ impl Workspace {
                         this.run_active(window, cx);
                     })))
                     .child(section("AUDIT & REVERSE ENGINEERING"))
-                    .when(presets.is_empty(), |d| d.child(div().px(px(10.)).py(px(6.)).text_color(color(c::TEXT_DIM)).child("Checking installed tools…")))
+                    .when(presets.is_empty(), |d| d.child(div().px(px(10.)).py(px(6.)).text_color(color(c::TEXT_DIM)).child("Checking installed toolsâ€¦")))
                     .children(presets.into_iter().enumerate().map(|(ix, (preset, installed))| {
                         let detail: SharedString = if installed {
                             if preset.needs_target { format!("{}<target>", preset.command).into() } else { preset.command.into() }
                         } else {
-                            format!("not installed — {}", preset.install_hint).into()
+                            format!("not installed â€” {}", preset.install_hint).into()
                         };
                         let row = item("menu-preset", preset.label.into(), Some(detail), None).id(("menu-preset", ix));
                         if installed {
@@ -1426,17 +1536,61 @@ impl Workspace {
                         }
                     }))
             }
+            Menu::Plugins => {
+                let tabs = crate::lua_bridge::tabs(cx);
+                panel
+                    .top(px(theme::TITLE_BAR_HEIGHT + theme::ISLAND_HEADER_HEIGHT))
+                    .left(px(theme::GAP + 8.))
+                    .child(item("menu-init", "Open init.lua".into(), Some("~/.config/graphyne/init.lua â€” reloads on save".into()), None).on_click(cx.listener(|this, _, window, cx| {
+                        this.menu = None;
+                        match crate::lua_bridge::ensure_init_file(cx) {
+                            Some(file) => this.open_file(file, None, window, cx),
+                            None => this.notify_user("Could not create ~/.config/graphyne/init.lua", true, cx),
+                        }
+                        cx.notify();
+                    })))
+                    .child(item("menu-plugins-dir", "Open plugins folder".into(), None, None).on_click(cx.listener(|this, _, _, cx| {
+                        this.menu = None;
+                        let dir = crate::lua_bridge::plugins_dir(cx);
+                        cx.reveal_path(&dir);
+                        cx.notify();
+                    })))
+                    .child(item("menu-lua-reload", "Reload Lua".into(), None, None).on_click(cx.listener(|this, _, _, cx| {
+                        this.menu = None;
+                        crate::lua_bridge::send(graphyne_lua::ToLua::Reload, cx);
+                        cx.notify();
+                    })))
+                    .child(section("PLUGIN TABS"))
+                    .when(tabs.is_empty(), |d| d.child(div().px(px(10.)).py(px(6.)).text_color(color(c::TEXT_DIM)).child("None yet â€” graphyne.ui.register_tab in init.lua")))
+                    .children(tabs.into_iter().enumerate().map(|(ix, t)| {
+                        let side = if t.side == graphyne_lua::Side::Left { "left panel" } else { "right panel" };
+                        let id = t.id;
+                        let left = t.side == graphyne_lua::Side::Left;
+                        item("menu-plugin-tab", t.title.clone(), Some(side.into()), None).id(("menu-plugin-tab", ix)).on_click(cx.listener(move |this, _, _, cx| {
+                            this.menu = None;
+                            if left {
+                                this.left = true;
+                                this.left_tab = LeftTab::Plugin(id);
+                            } else {
+                                this.right = true;
+                                this.right_tab = RightTab::Plugin(id);
+                            }
+                            crate::lua_bridge::send(graphyne_lua::ToLua::TabRefresh { tab: id }, cx);
+                            cx.notify();
+                        }))
+                    }))
+            }
             Menu::App => panel
                 .right(px(130.))
                 .child(open_folder)
-                .child(item("menu-actions", "All Actions…".into(), None, Some("Ctrl+Shift+O")).on_click(cx.listener(|this, _, window, cx| {
+                .child(item("menu-actions", "All Actionsâ€¦".into(), None, Some("Ctrl+Shift+O")).on_click(cx.listener(|this, _, window, cx| {
                     this.menu = None;
                     this.toggle_search(window, cx);
                     cx.notify();
                 })))
                 .child(item("menu-about", "About Graphyne".into(), None, None).on_click(cx.listener(|this, _, _, cx| {
                     this.menu = None;
-                    let msg = format!("Graphyne {} — Rust + GPUI. Settings and plugins (init.lua) are not available yet.", env!("CARGO_PKG_VERSION"));
+                    let msg = format!("Graphyne {} â€” Rust + GPUI. Settings and plugins (init.lua) are not available yet.", env!("CARGO_PKG_VERSION"));
                     this.notify_user(msg, false, cx);
                     this.show_notifications = true;
                     this.unread = false;
@@ -1620,6 +1774,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::debug_step_into))
             .on_action(cx.listener(Self::debug_step_out))
             .on_action(cx.listener(Self::debug_stop))
+            .on_action(cx.listener(Self::lua_key))
             .on_modifiers_changed(cx.listener(Self::on_modifiers))
             .capture_key_down(cx.listener(|this, _, _, _| this.last_shift = None))
             .on_mouse_move(cx.listener(Self::on_mouse_move))

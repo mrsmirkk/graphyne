@@ -6,6 +6,9 @@ $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 
 if (-not $SkipBuild) {
+    # LuaJIT's msvcbuild.bat runs the helper tools it just built from the current folder;
+    # this variable (set by some shells / agents) forbids that.
+    Remove-Item Env:NoDefaultCurrentDirectoryInExePath -ErrorAction SilentlyContinue
     cargo build --release
     if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed" }
 }

@@ -239,7 +239,7 @@ impl TerminalView {
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = self.state.clone() else { return };
-        let lh = px(theme::TERM_LINE_HEIGHT);
+        let lh = px(theme::term_line_height());
         let dy = event.delta.pixel_delta(lh).y;
         let lines = (dy / lh).round() as i32;
         if lines != 0 {
@@ -324,11 +324,11 @@ fn terminal_element(view: Entity<TerminalView>) -> impl IntoElement {
     canvas(
         move |bounds, window, cx| {
             let font = gpui::font(theme::fonts().code);
-            let font_size = px(theme::TERM_SIZE);
+            let font_size = px(theme::term_size());
             let text_system = window.text_system().clone();
             let font_id = text_system.resolve_font(&font);
             let cell_w = text_system.advance(font_id, font_size, 'm').map(|s| s.width).unwrap_or(px(8.));
-            let cell_h = px(theme::TERM_LINE_HEIGHT);
+            let cell_h = px(theme::term_line_height());
             let origin = point(bounds.left() + px(10.), bounds.top() + px(6.));
             let cols = ((bounds.size.width - px(20.)) / cell_w).floor().max(10.) as u16;
             let rows = ((bounds.size.height - px(8.)) / cell_h).floor().max(2.) as u16;
@@ -350,7 +350,7 @@ fn terminal_element(view: Entity<TerminalView>) -> impl IntoElement {
             window.handle_input(&focus_handle, ElementInputHandler::new(bounds, view.clone()), cx);
             let Some(p) = paint else { return };
             let font = gpui::font(theme::fonts().code);
-            let font_size = px(theme::TERM_SIZE);
+            let font_size = px(theme::term_size());
             let snap = &p.snapshot;
             window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
                 // Backgrounds.

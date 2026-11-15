@@ -503,6 +503,15 @@ pub fn expression_ending_at(tree: &Tree, end: usize) -> Option<Range<usize>> {
     best.map(|n| n.byte_range())
 }
 
+/// Kind and byte range of the smallest named node at `byte` (Lua `buffer.node_at_cursor`).
+pub fn node_at(tree: &Tree, byte: usize) -> Option<(String, Range<usize>)> {
+    let mut node = tree.root_node().descendant_for_byte_range(byte, byte)?;
+    while !node.is_named() {
+        node = node.parent()?;
+    }
+    Some((node.kind().to_string(), node.byte_range()))
+}
+
 /// Structural "Extend Selection" (Ctrl+W): the smallest node strictly larger than `range`.
 pub fn expand_selection(tree: &Tree, range: Range<usize>) -> Option<Range<usize>> {
     let mut node = tree.root_node().descendant_for_byte_range(range.start, range.end)?;

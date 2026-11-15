@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 graphyne-core.workspace = true
 graphyne-syntax.workspace = true
+graphyne-lua.workspace = true
 graphyne-terminal.workspace = true
 graphyne-git.workspace = true
 graphyne-lsp.workspace = true

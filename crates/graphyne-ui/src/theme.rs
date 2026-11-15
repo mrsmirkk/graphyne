@@ -3,6 +3,7 @@
 use gpui::{Hsla, Pixels, Rgba, px, rgb, rgba};
 use graphyne_syntax::HighlightKind;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub mod c {
     //! Raw 0xRRGGBB constants.
@@ -102,10 +103,41 @@ pub fn fonts() -> &'static Fonts {
 
 pub const UI_TEXT: f32 = 13.0;
 pub const UI_SMALL: f32 = 12.0;
-pub const CODE_SIZE: f32 = 13.5;
-pub const CODE_LINE_HEIGHT: f32 = 22.0;
-pub const TERM_SIZE: f32 = 13.0;
-pub const TERM_LINE_HEIGHT: f32 = 19.0;
+// Font sizes and autosave delay can be changed at run time from init.lua
+// (`graphyne.settings.set`), hence atomics instead of constants.
+static CODE_SIZE_BITS: AtomicU32 = AtomicU32::new(13.5f32.to_bits());
+static TERM_SIZE_BITS: AtomicU32 = AtomicU32::new(13.0f32.to_bits());
+static AUTOSAVE_MS: AtomicU64 = AtomicU64::new(500);
+
+pub fn code_size() -> f32 {
+    f32::from_bits(CODE_SIZE_BITS.load(Ordering::Relaxed))
+}
+/// Line height keeps the default 13.5 / 22 proportion.
+pub fn code_line_height() -> f32 {
+    (code_size() * 22.0 / 13.5).round()
+}
+pub fn term_size() -> f32 {
+    f32::from_bits(TERM_SIZE_BITS.load(Ordering::Relaxed))
+}
+pub fn term_line_height() -> f32 {
+    (term_size() * 19.0 / 13.0).round()
+}
+pub fn autosave_delay() -> std::time::Duration {
+    std::time::Duration::from_millis(AUTOSAVE_MS.load(Ordering::Relaxed))
+}
+
+/// Apply a `graphyne.settings.set` value (already range-checked by graphyne-lua).
+/// Returns whether something changed.
+pub fn apply_setting(key: &str, value: &graphyne_lua::SettingValue) -> bool {
+    let graphyne_lua::SettingValue::Number(n) = value else { return false };
+    let n = *n;
+    match key {
+        "editor.font_size" => CODE_SIZE_BITS.swap((n as f32).to_bits(), Ordering::Relaxed) != (n as f32).to_bits(),
+        "terminal.font_size" => TERM_SIZE_BITS.swap((n as f32).to_bits(), Ordering::Relaxed) != (n as f32).to_bits(),
+        "editor.autosave_delay_ms" => AUTOSAVE_MS.swap(n as u64, Ordering::Relaxed) != n as u64,
+        _ => false,
+    }
+}
 pub const ISLAND_RADIUS: f32 = 8.0;
 pub const GAP: f32 = 5.0;
 pub const TITLE_BAR_HEIGHT: f32 = 40.0;

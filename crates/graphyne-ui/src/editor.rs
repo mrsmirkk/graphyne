@@ -45,7 +45,6 @@ struct BpEdit {
 
 const TAB_WIDTH: usize = 4;
 const MAX_RENDER_COLS: usize = 4000;
-const AUTOSAVE_DELAY: Duration = Duration::from_millis(500);
 /// Above this size a buffer is edited as plain text: no syntax tree, git gutter diff or
 /// full-text analysis (each would re-scan the whole file after every keystroke).
 const LARGE_FILE_BYTES: usize = 16 * 1024 * 1024;
@@ -395,7 +394,7 @@ impl Editor {
             return;
         }
         self.autosave_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(AUTOSAVE_DELAY).await;
+            cx.background_executor().timer(theme::autosave_delay()).await;
             // Detach: the write must outlive this debounce task (which a newer edit may cancel).
             if let Ok(Some(task)) = this.update(cx, |this, cx| this.write_to_disk(cx)) {
                 task.detach();
@@ -1546,7 +1545,7 @@ impl Editor {
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let lh = px(theme::CODE_LINE_HEIGHT);
+        let lh = px(theme::code_line_height());
         let delta = event.delta.pixel_delta(lh);
         let (dx, dy) = if event.modifiers.shift && delta.x == px(0.) { (delta.y, px(0.)) } else { (delta.x, delta.y) };
         self.scroll_y = (self.scroll_y - dy).max(px(0.));
@@ -1557,6 +1556,35 @@ impl Editor {
 
     fn total_display_rows(&self) -> usize {
         self.buffer.len_lines() + self.lenses.len()
+    }
+
+    /// Snapshot for `graphyne.buffer.*` (text omitted for very large files).
+    pub fn lua_context(&self, ctx: &mut graphyne_lua::EditorContext) {
+        let (row, col) = self.buffer.row_col(self.sel.head);
+        ctx.path = self.path.as_ref().map(|p| p.to_string_lossy().to_string());
+        ctx.language = Some(self.language.name().to_string());
+        ctx.text = (self.buffer.len_bytes() <= 8 * 1024 * 1024).then(|| self.buffer.rope().to_string());
+        ctx.line = row + 1;
+        ctx.column = col + 1;
+        ctx.selection = self.buffer.slice_to_string(self.sel.range());
+        if let Some((kind, range)) = self.tree.as_ref().and_then(|t| graphyne_syntax::node_at(t, self.buffer.char_to_byte(self.sel.head))) {
+            let rope = self.buffer.rope();
+            let (s, e) = (rope.byte_to_char(range.start.min(rope.len_bytes())), rope.byte_to_char(range.end.min(rope.len_bytes())));
+            ctx.node_kind = Some(kind);
+            ctx.node_text = Some(self.buffer.slice_to_string(s..e.min(s + 4000)));
+        }
+    }
+
+    /// `graphyne.buffer.insert / replace_selection / set_text`.
+    pub fn lua_edit(&mut self, edit: graphyne_lua::BufferEdit, cx: &mut Context<Self>) {
+        match edit {
+            graphyne_lua::BufferEdit::Insert(t) | graphyne_lua::BufferEdit::ReplaceSelection(t) => self.insert_at_selection(&t, cx),
+            graphyne_lua::BufferEdit::SetText(t) => {
+                let len = self.buffer.len_chars();
+                let caret = self.sel.head.min(t.chars().count());
+                self.replace(0..len, &t, Selection::caret(caret), cx);
+            }
+        }
     }
 
     fn is_large(&self) -> bool {
@@ -1836,8 +1864,8 @@ fn editor_element(editor: Entity<Editor>) -> impl IntoElement {
         move |bounds, window, cx| {
             let frame_start = std::time::Instant::now();
             let code_font = gpui::font(theme::fonts().code);
-            let font_size = px(theme::CODE_SIZE);
-            let line_height = px(theme::CODE_LINE_HEIGHT);
+            let font_size = px(theme::code_size());
+            let line_height = px(theme::code_line_height());
             let text_system = window.text_system().clone();
             let font_id = text_system.resolve_font(&code_font);
             let char_width = text_system.advance(font_id, font_size, 'm').map(|s| s.width).unwrap_or(px(8.));
@@ -2186,7 +2214,7 @@ fn editor_element(editor: Entity<Editor>) -> impl IntoElement {
             });
 
             // Gutter: breakpoints, execution arrow, numbers, git markers.
-            let num_size = px(theme::CODE_SIZE - 1.0);
+            let num_size = px(theme::code_size() - 1.0);
             for r in &state.rows {
                 let Some(row) = r.row else { continue };
                 // Gutter markers share one 12 px slot left of the line numbers:
@@ -2365,7 +2393,7 @@ impl Editor {
                     .border_color(color(c::POPUP_BORDER))
                     .shadow_lg()
                     .font_family(theme::fonts().code)
-                    .text_size(px(theme::CODE_SIZE - 0.5))
+                    .text_size(px(theme::code_size() - 0.5))
                     .children(items.into_iter().enumerate().map(move |(ix, entry)| {
                         let entity = entity.clone();
                         let (badge, badge_color) = if entry.lsp.is_some() || entry.kind == 14 {

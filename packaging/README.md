@@ -65,9 +65,37 @@
 - Secrets Guard, hex-редактор, автосохранение. Файлы больше 16 МБ открываются как простой
   текст, без подсветки и анализа.
 
+## Плагины и настройки на Lua (LuaJIT)
+
+Файл `~/.config/graphyne/init.lua` (на Windows `C:\Users\<имя>\.config\graphyne\init.lua`)
+выполняется при запуске и заново при каждом сохранении — перезапуск не нужен. Кнопка «+» в
+шапке левой панели → **Open init.lua** создаст его с примерами. Плагины лежат рядом, в
+`plugins/` (`имя.lua` или `имя/init.lua`). Папку можно переопределить переменной
+`GRAPHYNE_CONFIG_DIR`.
+
+| API | Что делает |
+| --- | --- |
+| `graphyne.settings.set("editor.font_size", 15)` | размер шрифта редактора; также `terminal.font_size`, `editor.autosave_delay_ms` |
+| `graphyne.keymap.set("editor" / "global", "ctrl-alt-d", fn)` | своя горячая клавиша |
+| `graphyne.buffer.get_text()`, `get_cursor()`, `get_selection()`, `get_path()`, `node_at_cursor()` | текст, курсор, выделение, узел синтаксического дерева |
+| `graphyne.buffer.insert(text)`, `replace_selection(text)`, `set_text(text)` | правка активного файла |
+| `graphyne.terminal.run("cmd", { tab = "имя" })` | команда во вкладке терминала |
+| `graphyne.ui.notify(msg, "error"?)`, `print(...)` | уведомление |
+| `graphyne.ui.register_tab({ title, side = "left"/"right", items = fn })` | своя вкладка в панели; элементы — строки или `{ text, detail, on_click }` |
+| `graphyne.workspace.root()`, `graphyne.workspace.open(path, line)` | папка проекта, открыть файл |
+| `graphyne.plugins.allow("имя", { "os", "io", "ffi" })` | снять ограничения песочницы для плагина |
+
+- Lua работает в отдельном потоке: зависший скрипт не тормозит интерфейс, а через 2 секунды
+  останавливается. Поэтому JIT-компиляция по умолчанию выключена (её код такие проверки
+  пропускает); включить можно в `init.lua` через `jit.on()`.
+- Сторонние плагины работают в песочнице: без `os.execute`, `io.popen`, `ffi`, `debug`;
+  `require` загружает модули только из папки самого плагина. `init.lua` — ваш файл, ему
+  доступно всё.
+
 ## Ограничения альфа-версии
 
-- Нет плагинов LuaJIT, баз данных / DataGrid, настроек, сворачивания блоков кода.
+- Нет баз данных / DataGrid, окна настроек (настройки — через `init.lua`), сворачивания
+  блоков кода.
 - Выбор блоков для частичного коммита живёт до закрытия IDE.
 - Запуск дольше цели ТЗ (30 мс): основное время уходит на инициализацию DirectX.
 - Проверено только на Windows 11 x64.

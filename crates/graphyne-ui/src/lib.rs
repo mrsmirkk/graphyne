@@ -13,6 +13,7 @@ mod file_icons_data;
 mod file_tree;
 mod hex_view;
 mod lsp_store;
+mod lua_bridge;
 mod panels;
 mod search_everywhere;
 mod terminal_view;
@@ -47,6 +48,8 @@ pub fn run() {
         theme::init_fonts(&cx.text_system().all_font_names());
         mark("font enumeration");
         actions::bind_keys(cx);
+        // LuaJIT plugins: the VM loads init.lua on its own thread.
+        lua_bridge::init(cx);
         cx.on_action(|_: &actions::Quit, cx| cx.quit());
         cx.observe_keystrokes(|ev, _, _| {
             log::trace!(
