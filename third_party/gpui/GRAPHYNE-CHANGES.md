@@ -11,6 +11,13 @@ from `Cargo.toml`. Everything else is unchanged except:
   device (with its context and feature level) is now the one that is used.
 - `src/platform/windows/platform.rs`, `directx_devices.rs` — optional timing of the platform
   start-up steps, printed to stderr when `GRAPHYNE_STARTUP_TRACE` is set.
+- `src/platform/windows/keyboard.rs` — punctuation keys were named by the active layout, so
+  on the Russian (or any non-Latin) layout Ctrl+/ arrived as `ctrl-.`, Ctrl+[ as `ctrl-х`,
+  and those shortcuts and terminal control codes never matched (letter keys were fine:
+  `MapVirtualKeyW` names them A–Z on every layout). When the layout's letter keys don't
+  type Latin letters, `Keystroke.key` is now the US-layout character of the physical key
+  (`us_layout_key`, `layout_is_non_latin`, cached per layout); `key_char` and typed text
+  still follow the active layout.
 
 To update gpui: copy the new release over this folder (minus `examples/`, `docs/`), drop the
 `[[example]]` tables again and re-apply the changes above.

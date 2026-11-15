@@ -2,7 +2,7 @@ use anyhow::Result;
 use collections::HashMap;
 use windows::Win32::UI::{
     Input::KeyboardAndMouse::{
-        GetKeyboardLayoutNameW, MAPVK_VK_TO_CHAR, MAPVK_VK_TO_VSC, MapVirtualKeyW, ToUnicode,
+        GetKeyboardLayout, GetKeyboardLayoutNameW, MAPVK_VK_TO_CHAR, MAPVK_VK_TO_VSC, MapVirtualKeyW, ToUnicode,
         VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_ABNT_C1,
         VK_CONTROL, VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7,
         VK_OEM_8, VK_OEM_102, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_SHIFT,
@@ -158,7 +158,7 @@ impl WindowsKeyboardMapper {
             if scan_code == 0 {
                 continue;
             }
-            if let Some(shifted_key) = get_shifted_key(*vkey, scan_code) {
+            if let Some(shifted_key) = shifted_key_name(*vkey, scan_code) {
                 key_to_vkey.insert(shifted_key.clone(), (vkey.0, true));
                 vkey_to_shifted.insert(vkey.0, shifted_key);
             }
@@ -185,12 +185,23 @@ pub(crate) fn get_keystroke_key(
     modifiers: &mut Modifiers,
 ) -> Option<String> {
     if modifiers.shift && need_to_convert_to_shifted_key(vkey) {
-        get_shifted_key(vkey, scan_code).inspect(|_| {
+        shifted_key_name(vkey, scan_code).inspect(|_| {
             modifiers.shift = false;
         })
     } else {
         get_key_from_vkey(vkey)
     }
+}
+
+/// Graphyne: the name of a Shift+key; see `get_key_from_vkey` — on a non-Latin layout it is
+/// the US shifted character.
+fn shifted_key_name(vkey: VIRTUAL_KEY, scan_code: u32) -> Option<String> {
+    if layout_is_non_latin() {
+        if let Some(key) = us_layout_key(vkey, true) {
+            return Some(key.to_string());
+        }
+    }
+    get_shifted_key(vkey, scan_code)
 }
 
 fn get_key_from_vkey(vkey: VIRTUAL_KEY) -> Option<String> {
@@ -199,10 +210,84 @@ fn get_key_from_vkey(vkey: VIRTUAL_KEY) -> Option<String> {
         return None;
     }
 
+    // Graphyne: on a non-Latin layout (Russian, Ukrainian, Greek, Hebrew, …) keys are named
+    // by their US-layout character, so Ctrl+/ / Ctrl+[ / Ctrl+, shortcuts and terminal
+    // control codes follow the physical key, as in JetBrains IDEs. Without this, Ctrl+/ on
+    // the Russian layout arrives as "ctrl-." and Ctrl+[ as "ctrl-х". Typed text is unaffected:
+    // it comes from `key_char` (ToUnicode) and WM_CHAR, which still use the active layout.
+    if layout_is_non_latin() {
+        if let Some(key) = us_layout_key(vkey, false) {
+            return Some(key.to_string());
+        }
+    }
+
     // The high word contains dead key flag, the low word contains the character
     let key = char::from_u32(key_data & 0xFFFF)?;
 
     Some(key.to_ascii_lowercase().to_string())
+}
+
+/// Graphyne: true when the active layout's letter keys don't type Latin letters (Russian,
+/// Greek, …). `MapVirtualKeyW` can't tell: it names VK_A..VK_Z "A".."Z" on every layout, but
+/// the punctuation keys by the layout's own letters (ю, б, х, …), which is why Ctrl+/ or
+/// Ctrl+[ never matched. What the letter keys type is checked once per layout.
+fn layout_is_non_latin() -> bool {
+    use std::cell::Cell;
+    thread_local! {
+        static CACHE: Cell<Option<(isize, bool)>> = const { Cell::new(None) };
+    }
+    let hkl = unsafe { GetKeyboardLayout(0) }.0 as isize;
+    CACHE.with(|cache| {
+        if let Some((cached, non_latin)) = cache.get() {
+            if cached == hkl {
+                return non_latin;
+            }
+        }
+        let non_latin = (0x41u16..=0x5A).any(|vk| {
+            let scan_code = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) };
+            generate_key_char(VIRTUAL_KEY(vk), scan_code, false, false, false)
+                .and_then(|typed| typed.chars().next())
+                .is_some_and(|c| c.is_alphabetic() && !c.is_ascii())
+        });
+        cache.set(Some((hkl, non_latin)));
+        non_latin
+    })
+}
+
+/// Graphyne: the character a key types on the US layout (`None` for non-character keys).
+fn us_layout_key(vkey: VIRTUAL_KEY, shifted: bool) -> Option<&'static str> {
+    const LETTERS: [&str; 26] = [
+        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q",
+        "r", "s", "t", "u", "v", "w", "x", "y", "z",
+    ];
+    const DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    const SHIFTED_DIGITS: [&str; 10] = [")", "!", "@", "#", "$", "%", "^", "&", "*", "("];
+    let (plain, shift) = match vkey.0 {
+        // Letters: Shift stays a modifier, so both forms are the lowercase letter.
+        0x41..=0x5A => {
+            let letter = LETTERS[(vkey.0 - 0x41) as usize];
+            (letter, letter)
+        }
+        0x30..=0x39 => {
+            let ix = (vkey.0 - 0x30) as usize;
+            (DIGITS[ix], SHIFTED_DIGITS[ix])
+        }
+        _ => match vkey {
+            VK_OEM_3 => ("`", "~"),
+            VK_OEM_MINUS => ("-", "_"),
+            VK_OEM_PLUS => ("=", "+"),
+            VK_OEM_4 => ("[", "{"),
+            VK_OEM_6 => ("]", "}"),
+            VK_OEM_5 | VK_OEM_102 => ("\\", "|"),
+            VK_OEM_1 => (";", ":"),
+            VK_OEM_7 => ("'", "\""),
+            VK_OEM_COMMA => (",", "<"),
+            VK_OEM_PERIOD => (".", ">"),
+            VK_OEM_2 => ("/", "?"),
+            _ => return None,
+        },
+    };
+    Some(if shifted { shift } else { plain })
 }
 
 #[inline]
