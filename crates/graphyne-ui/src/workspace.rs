@@ -102,6 +102,8 @@ pub struct Workspace {
     recent: Vec<PathBuf>,
     /// Run-menu presets for this project, with "installed" flags.
     run_presets: Vec<(&'static graphyne_core::presets::Preset, bool)>,
+    /// Live-reload preview server, started by the first Run on an HTML/CSS file.
+    live_server: Option<Arc<graphyne_core::live_server::LiveServer>>,
     last_shift: Option<Instant>,
     shift_down: bool,
     left_width: Pixels,
@@ -245,6 +247,7 @@ impl Workspace {
             menu: None,
             recent: Vec::new(),
             run_presets: Vec::new(),
+            live_server: None,
             last_shift: None,
             shift_down: false,
             left_width: px(270.),
@@ -364,6 +367,9 @@ impl Workspace {
     }
 
     fn on_fs_change(&mut self, files: Vec<PathBuf>, git_only: bool, cx: &mut Context<Self>) {
+        if let (Some(server), false) = (&self.live_server, files.is_empty()) {
+            server.reload();
+        }
         if !files.is_empty() {
             self.file_tree.update(cx, |t, cx| t.refresh(cx));
             self.index_files(cx);
@@ -708,9 +714,44 @@ impl Workspace {
                 .detach();
             }
             RunPlan::WebPreview { entry, .. } => {
-                let url = format!("file:///{}", entry.to_string_lossy().replace('\\', "/").trim_start_matches('/'));
-                cx.open_url(&url);
-                self.notify_user("Opened in browser (live-reload server is on the roadmap)", false, cx);
+                // Serve the project on 127.0.0.1 and open the page there; saves reload it.
+                let existing = self.live_server.clone();
+                let root = self.root.clone();
+                cx.spawn(async move |this, cx| {
+                    for s in saves {
+                        s.await;
+                    }
+                    let started = cx
+                        .background_spawn(async move {
+                            let server = match existing {
+                                Some(server) => server,
+                                None => graphyne_core::live_server::LiveServer::start(root)?,
+                            };
+                            // A stylesheet previews through the page next to it.
+                            let page = match entry.extension().and_then(|e| e.to_str()) {
+                                Some("css" | "scss") => entry.parent().map(|d| d.join("index.html")).filter(|p| p.is_file()).unwrap_or(entry),
+                                _ => entry,
+                            };
+                            let url = server.url_for(&page);
+                            Ok::<_, std::io::Error>((server, url))
+                        })
+                        .await;
+                    this.update(cx, |this, cx| match started {
+                        Ok((server, url)) => {
+                            this.live_server = Some(server);
+                            match url {
+                                Some(url) => {
+                                    cx.open_url(&url);
+                                    this.notify_user(format!("Live preview at {url}: the page reloads on every save"), false, cx);
+                                }
+                                None => this.notify_user("Live preview serves only files inside the project folder", true, cx),
+                            }
+                        }
+                        Err(e) => this.notify_user(format!("Live preview server failed to start: {e}"), true, cx),
+                    })
+                    .ok();
+                })
+                .detach();
             }
             RunPlan::Sql { .. } => self.notify_user("SQL execution → DataGrid requires a database connection (planned: sqlx pools)", true, cx),
             RunPlan::Unsupported { reason } => self.notify_user(reason, true, cx),

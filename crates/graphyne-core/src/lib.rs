@@ -14,6 +14,7 @@ pub mod fs_util;
 pub mod fuzzy;
 pub mod language;
 pub mod libraries;
+pub mod live_server;
 pub mod presets;
 pub mod project;
 pub mod recent;
