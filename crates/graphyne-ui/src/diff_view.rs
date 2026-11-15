@@ -1,31 +1,41 @@
 //! Side-by-side diff of a file against `HEAD` (spec §7): one virtualised list of aligned
 //! rows, so both columns always scroll together; changed blocks are joined by smooth
-//! connector shapes in the middle gutter, IntelliJ style.
+//! connector shapes in the middle gutter, IntelliJ style. Each block has a checkbox that
+//! decides whether it goes into the next commit (line-level staging), and changed words
+//! inside modified lines are highlighted.
 
 use crate::assets::Icon;
-use crate::components::{small_icon_button, tooltip};
+use crate::components::{icon, small_icon_button, tooltip};
 use crate::theme::{self, c, color, color_a};
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, EventEmitter, FocusHandle, Focusable, HighlightStyle, Hsla, Pixels, SharedString, StyledText,
-    UniformListScrollHandle, Window, canvas, div, point, px, uniform_list,
+    App, Bounds, Context, EventEmitter, FocusHandle, Focusable, HighlightStyle, Hsla, Pixels, ScrollWheelEvent, SharedString,
+    StyledText, UniformListScrollHandle, Window, canvas, div, point, px, uniform_list,
 };
 use graphyne_core::LanguageId;
 use graphyne_git::{SideKind, SideRow};
 use graphyne_syntax::HighlightKind;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const ROW_H: f32 = 22.;
 const GUTTER_W: f32 = 30.;
 const NUMBER_W: f32 = 44.;
 
+/// Changed blocks left out of the next commit, per file (by block signature). Shared by
+/// the diff views (checkboxes) and the Git tab (commit).
+pub type HunkSelection = Arc<Mutex<HashMap<PathBuf, HashSet<u64>>>>;
+
 pub enum DiffEvent {
     OpenFile(PathBuf),
+    SelectionChanged,
 }
 
 type LineSpans = Vec<Vec<(Range<usize>, HighlightKind)>>;
+/// Changed byte ranges of a modified line pair (left, right).
+type WordRanges = (Vec<Range<usize>>, Vec<Range<usize>>);
 
 struct Side {
     lines: Vec<SharedString>,
@@ -36,8 +46,14 @@ struct Loaded {
     left: Side,
     right: Side,
     rows: Vec<SideRow>,
+    /// Per row: which changed block it belongs to.
+    hunk_of_row: Vec<Option<usize>>,
+    /// Per block: its signature (stable across unrelated edits).
+    hunk_sigs: Vec<u64>,
+    words: Vec<Option<WordRanges>>,
     added: usize,
     removed: usize,
+    max_cols: usize,
 }
 
 pub struct DiffView {
@@ -48,6 +64,10 @@ pub struct DiffView {
     error: Option<String>,
     /// Row of the changed block the ↑/↓ buttons moved to last.
     last_jump: Option<usize>,
+    excluded: HunkSelection,
+    /// Shared horizontal offset of both columns.
+    scroll_x: f32,
+    char_w: f32,
 }
 
 impl EventEmitter<DiffEvent> for DiffView {}
@@ -59,8 +79,18 @@ impl Focusable for DiffView {
 }
 
 impl DiffView {
-    pub fn new(path: PathBuf, cx: &mut Context<Self>) -> Self {
-        let mut view = Self { path, focus_handle: cx.focus_handle(), scroll: UniformListScrollHandle::new(), data: None, error: None, last_jump: None };
+    pub fn new(path: PathBuf, excluded: HunkSelection, cx: &mut Context<Self>) -> Self {
+        let mut view = Self {
+            path,
+            focus_handle: cx.focus_handle(),
+            scroll: UniformListScrollHandle::new(),
+            data: None,
+            error: None,
+            last_jump: None,
+            excluded,
+            scroll_x: 0.,
+            char_w: 8.,
+        };
         view.refresh(cx);
         view
     }
@@ -90,6 +120,25 @@ impl DiffView {
         .detach();
     }
 
+    fn excluded_set(&self) -> HashSet<u64> {
+        self.excluded.lock().unwrap_or_else(|e| e.into_inner()).get(&self.path).cloned().unwrap_or_default()
+    }
+
+    fn toggle_hunk(&mut self, sig: u64, cx: &mut Context<Self>) {
+        {
+            let mut map = self.excluded.lock().unwrap_or_else(|e| e.into_inner());
+            let set = map.entry(self.path.clone()).or_default();
+            if !set.remove(&sig) {
+                set.insert(sig);
+            }
+            if set.is_empty() {
+                map.remove(&self.path);
+            }
+        }
+        cx.emit(DiffEvent::SelectionChanged);
+        cx.notify();
+    }
+
     /// Scroll to the next (`dir` = 1) or previous (-1) changed block.
     fn jump(&mut self, dir: i32, cx: &mut Context<Self>) {
         let Some(data) = &self.data else { return };
@@ -112,6 +161,19 @@ impl DiffView {
         self.scroll.scroll_to_item_strict(target.saturating_sub(3), gpui::ScrollStrategy::Top);
         cx.notify();
     }
+
+    /// Shift+wheel or a horizontal swipe moves both columns sideways.
+    fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let d = event.delta.pixel_delta(px(ROW_H));
+        let dx = if event.modifiers.shift && f32::from(d.x) == 0. { f32::from(d.y) } else { f32::from(d.x) };
+        if dx == 0. {
+            return;
+        }
+        let max = self.data.as_ref().map(|d| d.max_cols as f32 * self.char_w - 240.).unwrap_or(0.).max(0.);
+        self.scroll_x = (self.scroll_x - dx).clamp(0., max);
+        cx.stop_propagation();
+        cx.notify();
+    }
 }
 
 fn load(path: &Path) -> Result<Loaded, String> {
@@ -124,10 +186,36 @@ fn load(path: &Path) -> Result<Loaded, String> {
         String::new()
     };
     let rows = graphyne_git::side_by_side(&base, &current);
+    let hunk_sigs = graphyne_git::hunk_signatures(&base, &current);
+    let mut hunk_of_row = Vec::with_capacity(rows.len());
+    let mut block: Option<usize> = None;
+    for r in &rows {
+        hunk_of_row.push(match r.hunk {
+            Some(h) => {
+                if h.index == 0 {
+                    block = Some(block.map_or(0, |b| b + 1));
+                }
+                block
+            }
+            None => None,
+        });
+    }
     let added = rows.iter().filter(|r| r.kind != SideKind::Same && r.right.is_some()).count();
     let removed = rows.iter().filter(|r| r.kind != SideKind::Same && r.left.is_some()).count();
     let lang = LanguageId::from_path(path);
-    Ok(Loaded { left: side(&base, lang), right: side(&current, lang), rows, added, removed })
+    let (left, right) = (side(&base, lang), side(&current, lang));
+    let words = rows
+        .iter()
+        .map(|r| match (r.kind, r.left, r.right) {
+            (SideKind::Modified, Some(l), Some(n)) => {
+                let (a, b) = (left.lines.get(l as usize), right.lines.get(n as usize));
+                a.zip(b).map(|(a, b)| graphyne_git::word_diff(a, b))
+            }
+            _ => None,
+        })
+        .collect();
+    let max_cols = left.lines.iter().chain(right.lines.iter()).map(|l| l.chars().count()).max().unwrap_or(0);
+    Ok(Loaded { left, right, rows, hunk_of_row, hunk_sigs, words, added, removed, max_cols })
 }
 
 /// Lines plus per-line syntax spans (skipped for very large files).
@@ -171,9 +259,44 @@ fn kind_color(kind: SideKind) -> u32 {
     }
 }
 
+/// Syntax colours and changed-word backgrounds merged into non-overlapping runs.
+fn merge_styles(len: usize, syntax: &[(Range<usize>, HighlightKind)], words: &[Range<usize>], word_bg: Hsla) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut cuts: Vec<usize> = vec![0, len];
+    for (r, _) in syntax {
+        cuts.extend([r.start.min(len), r.end.min(len)]);
+    }
+    for r in words {
+        cuts.extend([r.start.min(len), r.end.min(len)]);
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut out = Vec::new();
+    for pair in cuts.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if a >= b {
+            continue;
+        }
+        let kind = syntax.iter().find(|(r, _)| r.start <= a && a < r.end).map(|(_, k)| *k);
+        let in_word = words.iter().any(|r| r.start <= a && a < r.end);
+        if kind.is_none() && !in_word {
+            continue;
+        }
+        out.push((
+            a..b,
+            HighlightStyle {
+                color: kind.map(theme::syntax),
+                font_style: kind.filter(|k| theme::is_italic(*k)).map(|_| gpui::FontStyle::Italic),
+                background_color: in_word.then_some(word_bg),
+                ..Default::default()
+            },
+        ));
+    }
+    out
+}
+
 /// Connector slice for one row: the block's shape is the area between the block top and a
 /// smooth curve from the left extent (old lines) to the right extent (new lines).
-fn paint_connector(row: &SideRow, bounds: Bounds<Pixels>, window: &mut Window) {
+fn paint_connector(row: &SideRow, fill: Hsla, bounds: Bounds<Pixels>, window: &mut Window) {
     let Some(h) = row.hunk else { return };
     let w = f32::from(bounds.size.width);
     let row_h = f32::from(bounds.size.height);
@@ -193,35 +316,34 @@ fn paint_connector(row: &SideRow, bounds: Bounds<Pixels>, window: &mut Window) {
     }
     path.close();
     if let Ok(path) = path.build() {
-        window.paint_path(path, color_a(kind_color(row.kind), 0.30));
+        window.paint_path(path, fill);
     }
 }
 
-fn line_cell(side: &Side, line: Option<u32>, kind: SideKind, is_left: bool) -> impl IntoElement {
+struct Cell<'a> {
+    side: &'a Side,
+    line: Option<u32>,
+    kind: SideKind,
+    words: &'a [Range<usize>],
+    is_left: bool,
+    excluded: bool,
+    scroll_x: f32,
+}
+
+fn line_cell(cell: Cell<'_>) -> impl IntoElement {
+    let Cell { side, line, kind, words, is_left, excluded, scroll_x } = cell;
     let changed = kind != SideKind::Same;
+    // A block left out of the commit is drawn grey.
+    let tint = if excluded { c::TEXT_FAINT } else { kind_color(kind) };
     let bg: Option<Hsla> = match (line, changed) {
-        (Some(_), true) => Some(color_a(kind_color(kind), 0.14)),
+        (Some(_), true) => Some(color_a(tint, 0.14)),
         (None, _) => Some(color_a(c::TEXT_FAINT, 0.07)),
         _ => None,
     };
     let number: SharedString = line.map(|l| (l + 1).to_string()).unwrap_or_default().into();
     let text = line.and_then(|l| side.lines.get(l as usize)).cloned().unwrap_or_default();
-    let highlights: Vec<(Range<usize>, HighlightStyle)> = line
-        .and_then(|l| side.spans.get(l as usize))
-        .map(|spans| {
-            spans
-                .iter()
-                .map(|(r, k)| {
-                    let style = HighlightStyle {
-                        color: Some(theme::syntax(*k)),
-                        font_style: theme::is_italic(*k).then_some(gpui::FontStyle::Italic),
-                        ..Default::default()
-                    };
-                    (r.clone(), style)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let syntax: &[(Range<usize>, HighlightKind)] = line.and_then(|l| side.spans.get(l as usize)).map(Vec::as_slice).unwrap_or(&[]);
+    let highlights = merge_styles(text.len(), syntax, words, color_a(tint, 0.38));
     div()
         .flex()
         .flex_1()
@@ -229,27 +351,32 @@ fn line_cell(side: &Side, line: Option<u32>, kind: SideKind, is_left: bool) -> i
         .h_full()
         .items_center()
         .when_some(bg, |d, bg| d.bg(bg))
-        .when(changed && line.is_some(), |d| {
-            // Thin colour bar on the outer edge, like the editor's gutter markers.
-            let bar = div().w(px(3.)).h_full().bg(color(kind_color(kind)));
-            if is_left { d.child(bar) } else { d }
-        })
+        .when(changed && line.is_some() && is_left, |d| d.child(div().w(px(3.)).h_full().bg(color(tint))))
         .child(div().flex_none().w(px(NUMBER_W)).pr(px(10.)).text_right().text_color(color(c::TEXT_FAINT)).child(number))
         .child(
             div()
                 .flex_1()
                 .min_w(px(0.))
+                .h_full()
+                .flex()
+                .items_center()
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_color(theme::syntax(HighlightKind::Plain))
-                .child(StyledText::new(text).with_highlights(highlights)),
+                .when(excluded, |d| d.opacity(0.55))
+                .child(div().relative().left(px(-scroll_x)).child(StyledText::new(text).with_highlights(highlights))),
         )
 }
 
 impl Render for DiffView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let font_id = window.text_system().resolve_font(&gpui::font(theme::fonts().code));
+        self.char_w = window.text_system().advance(font_id, px(theme::CODE_SIZE), 'm').map(|s| f32::from(s.width)).unwrap_or(8.);
         let header_label = |t: &'static str| div().flex_1().pl(px(NUMBER_W)).text_color(color(c::TEXT_DIM)).child(t);
         let (added, removed) = self.data.as_ref().map(|d| (d.added, d.removed)).unwrap_or_default();
+        let excluded = self.excluded_set();
+        let total_blocks = self.data.as_ref().map(|d| d.hunk_sigs.len()).unwrap_or(0);
+        let skipped = self.data.as_ref().map(|d| d.hunk_sigs.iter().filter(|s| excluded.contains(s)).count()).unwrap_or(0);
         let path = self.path.clone();
         let header = div()
             .flex()
@@ -264,6 +391,7 @@ impl Render for DiffView {
             .child(header_label("HEAD"))
             .child(div().w(px(GUTTER_W)))
             .child(header_label("Working tree"))
+            .when(skipped > 0, |d| d.child(div().text_color(color(c::TEXT_DIM)).child(format!("{} of {total_blocks} changes in commit", total_blocks - skipped))))
             .child(div().text_color(color(c::GIT_ADDED)).child(format!("+{added}")))
             .child(div().text_color(color(c::RED)).child(format!("−{removed}")))
             .child(small_icon_button("diff-prev", Icon::ChevronUp, color(c::TEXT_MUTED)).tooltip(tooltip("Previous change", None)).on_click(cx.listener(|this, _, _, cx| this.jump(-1, cx))))
@@ -281,18 +409,54 @@ impl Render for DiffView {
             }
             (Some(data), None) => {
                 let data = data.clone();
-                uniform_list("diff-rows", data.rows.len(), cx.processor(move |_, range: Range<usize>, _, _| {
+                let scroll_x = self.scroll_x;
+                uniform_list("diff-rows", data.rows.len(), cx.processor(move |_, range: Range<usize>, _, cx| {
                     range
                         .map(|ix| {
                             let row = data.rows[ix];
+                            let block = data.hunk_of_row[ix];
+                            let sig = block.and_then(|b| data.hunk_sigs.get(b).copied());
+                            let is_excluded = sig.is_some_and(|s| excluded.contains(&s));
+                            let fill = color_a(if is_excluded { c::TEXT_FAINT } else { kind_color(row.kind) }, 0.30);
+                            let (wl, wr): (&[Range<usize>], &[Range<usize>]) = match &data.words[ix] {
+                                Some((l, r)) => (l, r),
+                                None => (&[], &[]),
+                            };
+                            // Checkbox on the first row of each block: include it in the next commit.
+                            let checkbox = (row.hunk.is_some_and(|h| h.index == 0)).then_some(sig).flatten().map(|sig| {
+                                div()
+                                    .id(("hunk-check", ix))
+                                    .absolute()
+                                    .top(px(4.))
+                                    .left(px((GUTTER_W - 14.) / 2.))
+                                    .size(px(14.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(3.))
+                                    .border_1()
+                                    .cursor_pointer()
+                                    .when(!is_excluded, |d| d.bg(color(c::ACCENT)).border_color(color(c::ACCENT)).child(icon(Icon::Check, 10., color(0xFFFFFF))))
+                                    .when(is_excluded, |d| d.bg(color(c::ISLAND)).border_color(color(c::TEXT_DIM)))
+                                    .tooltip(tooltip(if is_excluded { "Not in the next commit — click to include" } else { "In the next commit — click to leave out" }, None))
+                                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_hunk(sig, cx)))
+                            });
                             div()
                                 .id(ix)
                                 .flex()
                                 .w_full()
                                 .h(px(ROW_H))
-                                .child(line_cell(&data.left, row.left, row.kind, true))
-                                .child(div().flex_none().w(px(GUTTER_W)).h_full().child(canvas(|_, _, _| (), move |bounds, _, window, _| paint_connector(&row, bounds, window)).size_full()))
-                                .child(line_cell(&data.right, row.right, row.kind, false))
+                                .child(line_cell(Cell { side: &data.left, line: row.left, kind: row.kind, words: wl, is_left: true, excluded: is_excluded, scroll_x }))
+                                .child(
+                                    div()
+                                        .relative()
+                                        .flex_none()
+                                        .w(px(GUTTER_W))
+                                        .h_full()
+                                        .child(canvas(|_, _, _| (), move |bounds, _, window, _| paint_connector(&row, fill, bounds, window)).size_full())
+                                        .children(checkbox),
+                                )
+                                .child(line_cell(Cell { side: &data.right, line: row.right, kind: row.kind, words: wr, is_left: false, excluded: is_excluded, scroll_x }))
                         })
                         .collect()
                 }))
@@ -309,6 +473,7 @@ impl Render for DiffView {
             .flex_col()
             .font_family(theme::fonts().code)
             .text_size(px(theme::CODE_SIZE))
+            .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(header.font_family(theme::fonts().ui))
             .child(body)
     }

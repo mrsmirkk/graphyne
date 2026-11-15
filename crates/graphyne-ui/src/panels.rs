@@ -170,6 +170,8 @@ pub struct GitPanel {
     busy: bool,
     /// Open editors, flushed to disk before every commit.
     pub pane: Option<WeakEntity<crate::editor_pane::EditorPane>>,
+    /// Blocks deselected in diff views: those files are committed partially.
+    pub hunk_excluded: crate::diff_view::HunkSelection,
     _sub: Subscription,
 }
 
@@ -200,6 +202,7 @@ impl GitPanel {
             blocked: Vec::new(),
             busy: false,
             pane: None,
+            hunk_excluded: Default::default(),
             _sub: sub,
         };
         panel.refresh(cx);
@@ -246,6 +249,7 @@ impl GitPanel {
         }
         let message = self.message.read(cx).text().to_string();
         let unchecked = self.unchecked.clone();
+        let hunk_excluded = self.hunk_excluded.clone();
         // Auto-save contract: unsaved buffers reach disk before git looks at the tree.
         let saves = self.pane.as_ref().and_then(|p| p.update(cx, |p, cx| p.save_all(cx)).ok()).unwrap_or_default();
         self.busy = true;
@@ -259,7 +263,42 @@ impl GitPanel {
             let status_root = repo_root.clone();
             let changes = cx.background_spawn(async move { graphyne_git::status(&status_root).unwrap_or_default() }).await;
             let paths: Vec<String> = changes.into_iter().map(|c| c.rel_path).filter(|p| !unchecked.contains(p)).collect();
-            if paths.is_empty() {
+            // Files with blocks left out in the diff view: stage only the selected blocks.
+            let excluded: HashMap<String, HashSet<u64>> = {
+                let map = hunk_excluded.lock().unwrap_or_else(|e| e.into_inner());
+                paths.iter().filter_map(|rel| map.get(&repo_root.join(rel)).filter(|s| !s.is_empty()).map(|s| (rel.clone(), s.clone()))).collect()
+            };
+            let split_root = repo_root.clone();
+            let (paths, partial): (Vec<String>, Vec<(String, Vec<u8>)>) = cx
+                .background_spawn(async move {
+                    let (mut full, mut partial) = (Vec::new(), Vec::new());
+                    for rel in paths {
+                        let Some(set) = excluded.get(&rel) else {
+                            full.push(rel);
+                            continue;
+                        };
+                        let raw_base = graphyne_git::head_text(&split_root, &rel).unwrap_or_default();
+                        let Ok(raw_current) = graphyne_core::fs_util::read_text_lossy(&split_root.join(&rel)) else {
+                            full.push(rel);
+                            continue;
+                        };
+                        let (text, applied, total) =
+                            graphyne_git::apply_selected_hunks(&raw_base.replace("\r\n", "\n"), &raw_current.replace("\r\n", "\n"), set);
+                        if applied == 0 {
+                            continue;
+                        }
+                        if applied == total {
+                            full.push(rel);
+                            continue;
+                        }
+                        // Keep the repository's line endings.
+                        let text = if raw_base.contains("\r\n") { text.replace('\n', "\r\n") } else { text };
+                        partial.push((rel, text.into_bytes()));
+                    }
+                    (full, partial)
+                })
+                .await;
+            if paths.is_empty() && partial.is_empty() {
                 this.update(cx, |this, cx| {
                     this.busy = false;
                     this.status = Some(("Nothing to commit".into(), true));
@@ -270,6 +309,7 @@ impl GitPanel {
             }
             let scan_root = repo_root.clone();
             let scan_paths = paths.clone();
+            let scan_partial: Vec<(String, String)> = partial.iter().map(|(r, d)| (r.clone(), String::from_utf8_lossy(d).into_owned())).collect();
             // Pre-commit gate: scan exactly what would be committed.
             let findings = if force {
                 Vec::new()
@@ -287,6 +327,12 @@ impl GitPanel {
                             }
                         }
                     }
+                    // Partially committed files: scan what is actually staged.
+                    for (rel, text) in &scan_partial {
+                        for f in graphyne_core::secrets::scan(text) {
+                            out.push((rel.clone(), f));
+                        }
+                    }
                     out
                 })
                 .await
@@ -301,7 +347,7 @@ impl GitPanel {
                 .ok();
                 return;
             }
-            let result = cx.background_spawn(async move { graphyne_git::commit_paths(&repo_root, &paths, &message) }).await;
+            let result = cx.background_spawn(async move { graphyne_git::commit_selection(&repo_root, &paths, &partial, &message) }).await;
             this.update(cx, |this, cx| {
                 this.busy = false;
                 this.blocked.clear();
@@ -350,6 +396,8 @@ impl Render for GitPanel {
         let mut list = div().flex().flex_col().px(px(4.));
         for (ix, ch) in self.changes.iter().enumerate() {
             let checked = !self.unchecked.contains(&ch.rel_path);
+            let partial = checked && self.hunk_excluded.lock().unwrap_or_else(|e| e.into_inner()).get(&root.join(&ch.rel_path)).is_some_and(|s| !s.is_empty());
+            let abs = root.join(&ch.rel_path);
             let rel = ch.rel_path.clone();
             let rel2 = ch.rel_path.clone();
             let path = root.join(&ch.rel_path);
@@ -377,10 +425,15 @@ impl Render for GitPanel {
                             .rounded(px(3.))
                             .border_1()
                             .border_color(if checked { color(c::ACCENT) } else { color(c::TEXT_FAINT) })
-                            .when(checked, |d| d.bg(color(c::ACCENT)).child(icon(Icon::Check, 10., color(0xFFFFFF))))
+                            .when(checked && !partial, |d| d.bg(color(c::ACCENT)).child(icon(Icon::Check, 10., color(0xFFFFFF))))
+                            // Some blocks left out in the diff view: "partly selected" dash.
+                            .when(partial, |d| d.bg(color(c::ACCENT)).child(div().w(px(8.)).h(px(2.)).rounded(px(1.)).bg(color(0xFFFFFF))))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                if !this.unchecked.remove(&rel) {
+                                if partial {
+                                    // Partly selected → whole file selected again.
+                                    this.hunk_excluded.lock().unwrap_or_else(|e| e.into_inner()).remove(&abs);
+                                } else if !this.unchecked.remove(&rel) {
                                     this.unchecked.insert(rel.clone());
                                 }
                                 cx.notify();

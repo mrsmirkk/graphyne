@@ -2,7 +2,7 @@
 
 use crate::assets::Icon;
 use crate::components::{icon, island, island_header, kbd, tooltip};
-use crate::diff_view::{DiffEvent, DiffView};
+use crate::diff_view::{DiffEvent, DiffView, HunkSelection};
 use crate::editor::{Editor, EditorEvent};
 use crate::hex_view::HexView;
 use crate::theme::{self, c, color, color_a};
@@ -52,6 +52,8 @@ pub struct EditorPane {
     root: PathBuf,
     lsp_store: Entity<crate::lsp_store::LspStore>,
     pub debugger: Option<Entity<crate::debugger::Debugger>>,
+    /// Blocks left out of the next commit (shared with the Git tab).
+    pub hunk_excluded: HunkSelection,
     subs: Vec<Subscription>,
     pub error: Option<String>,
 }
@@ -66,7 +68,7 @@ impl Focusable for EditorPane {
 
 impl EditorPane {
     pub fn new(root: PathBuf, lsp_store: Entity<crate::lsp_store::LspStore>, cx: &mut Context<Self>) -> Self {
-        Self { focus_handle: cx.focus_handle(), items: Vec::new(), active: 0, root, lsp_store, debugger: None, subs: Vec::new(), error: None }
+        Self { focus_handle: cx.focus_handle(), items: Vec::new(), active: 0, root, lsp_store, debugger: None, hunk_excluded: HunkSelection::default(), subs: Vec::new(), error: None }
     }
 
     /// The open editor for `path`, if any.
@@ -114,9 +116,11 @@ impl EditorPane {
                 }
             }
             None => {
-                let view = cx.new(|cx| DiffView::new(path, cx));
+                let excluded = self.hunk_excluded.clone();
+                let view = cx.new(|cx| DiffView::new(path, excluded, cx));
                 self.subs.push(cx.subscribe(&view, |_, _, ev, cx| match ev {
                     DiffEvent::OpenFile(p) => cx.emit(PaneEvent::OpenLocation(p.clone(), 0, 0)),
+                    DiffEvent::SelectionChanged => cx.emit(PaneEvent::Changed),
                 }));
                 let at = (self.active + 1).min(self.items.len());
                 self.items.insert(at, PaneItem::Diff(view));

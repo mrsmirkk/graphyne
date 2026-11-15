@@ -347,15 +347,135 @@ pub fn side_by_side(base: &str, current: &str) -> Vec<SideRow> {
     rows
 }
 
+fn hunk_signature(old: &[&str], new: &[&str]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    old.hash(&mut h);
+    0xFFu8.hash(&mut h);
+    new.hash(&mut h);
+    h.finish()
+}
+
+fn clamp_range(r: &Range<u32>, len: usize) -> Range<usize> {
+    (r.start as usize).min(len)..(r.end as usize).min(len)
+}
+
+/// Identity of each changed block (in order) by its old and new lines, so a block keeps
+/// its "selected for commit" state while other parts of the file are edited. LF texts.
+pub fn hunk_signatures(base: &str, current: &str) -> Vec<u64> {
+    let (b, c): (Vec<&str>, Vec<&str>) = (base.lines().collect(), current.lines().collect());
+    line_diff(base, current).iter().map(|h| hunk_signature(&b[clamp_range(&h.old, b.len())], &c[clamp_range(&h.new, c.len())])).collect()
+}
+
+/// The content to stage when only some blocks are selected: `base` with every changed
+/// block applied except those whose signature is in `excluded`. Returns the text and
+/// (applied, total) block counts. LF texts.
+pub fn apply_selected_hunks(base: &str, current: &str, excluded: &std::collections::HashSet<u64>) -> (String, usize, usize) {
+    let (b_lines, c_lines): (Vec<&str>, Vec<&str>) = (base.lines().collect(), current.lines().collect());
+    let (b_raw, c_raw): (Vec<&str>, Vec<&str>) = (base.split_inclusive('\n').collect(), current.split_inclusive('\n').collect());
+    let hunks = line_diff(base, current);
+    let mut out = String::with_capacity(current.len().max(base.len()));
+    let mut pos = 0usize;
+    let mut applied = 0;
+    for h in &hunks {
+        let (old, new) = (clamp_range(&h.old, b_raw.len()), clamp_range(&h.new, c_raw.len()));
+        out.extend(b_raw[pos.min(old.start)..old.start].iter().copied());
+        let sig = hunk_signature(&b_lines[clamp_range(&h.old, b_lines.len())], &c_lines[clamp_range(&h.new, c_lines.len())]);
+        if excluded.contains(&sig) {
+            out.extend(b_raw[old.clone()].iter().copied());
+        } else {
+            applied += 1;
+            out.extend(c_raw[new].iter().copied());
+        }
+        pos = old.end;
+    }
+    out.extend(b_raw[pos.min(b_raw.len())..].iter().copied());
+    (out, applied, hunks.len())
+}
+
+/// Changed byte ranges inside a modified pair of lines, word by word (identifier runs,
+/// whitespace runs, single other characters). Very long lines are marked as a whole.
+pub fn word_diff(old: &str, new: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+    fn tokens(s: &str) -> Vec<Range<usize>> {
+        let mut out: Vec<Range<usize>> = Vec::new();
+        let class = |c: char| if c.is_alphanumeric() || c == '_' { 0 } else if c.is_whitespace() { 1 } else { 2 };
+        let mut last: Option<u8> = None;
+        for (i, ch) in s.char_indices() {
+            let k = class(ch);
+            match out.last_mut() {
+                Some(r) if last == Some(k) && k != 2 => r.end = i + ch.len_utf8(),
+                _ => out.push(i..i + ch.len_utf8()),
+            }
+            last = Some(k);
+        }
+        out
+    }
+    let (a, b) = (tokens(old), tokens(new));
+    if a.len() * b.len() > 160_000 {
+        return (vec![0..old.len()], vec![0..new.len()]);
+    }
+    // LCS over tokens; unmatched tokens are the changes.
+    let (n, m) = (a.len(), b.len());
+    let mut dp = vec![0u16; (n + 1) * (m + 1)];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i * (m + 1) + j] = if old[a[i].clone()] == new[b[j].clone()] {
+                dp[(i + 1) * (m + 1) + j + 1] + 1
+            } else {
+                dp[(i + 1) * (m + 1) + j].max(dp[i * (m + 1) + j + 1])
+            };
+        }
+    }
+    let (mut keep_a, mut keep_b) = (vec![false; n], vec![false; m]);
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if old[a[i].clone()] == new[b[j].clone()] {
+            keep_a[i] = true;
+            keep_b[j] = true;
+            i += 1;
+            j += 1;
+        } else if dp[(i + 1) * (m + 1) + j] >= dp[i * (m + 1) + j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    let changed = |toks: &[Range<usize>], keep: &[bool], text: &str| {
+        let mut out: Vec<Range<usize>> = Vec::new();
+        for (r, k) in toks.iter().zip(keep) {
+            // Whitespace alone is not worth a highlight.
+            if *k || text[r.clone()].trim().is_empty() {
+                continue;
+            }
+            match out.last_mut() {
+                Some(last) if text[last.end..r.start].trim().is_empty() => last.end = r.end,
+                _ => out.push(r.clone()),
+            }
+        }
+        out
+    };
+    (changed(&a, &keep_a, old), changed(&b, &keep_b, new))
+}
+
 /// Stage exactly `rel_paths` (adds / removals) and create a commit on HEAD.
 pub fn commit_paths(root: &Path, rel_paths: &[String], message: &str) -> Result<String> {
+    commit_selection(root, rel_paths, &[], message)
+}
+
+/// Commit whole files (`rel_paths`) plus files of which only some changed blocks are
+/// selected (`partial`: path and the exact content to stage, see [`apply_selected_hunks`]).
+pub fn commit_selection(root: &Path, rel_paths: &[String], partial: &[(String, Vec<u8>)], message: &str) -> Result<String> {
     if message.trim().is_empty() {
         return Err(anyhow!("Commit message is empty"));
     }
-    if rel_paths.is_empty() {
+    if rel_paths.is_empty() && partial.is_empty() {
         return Err(anyhow!("Nothing selected to commit"));
     }
     let repo = Repository::open(root)?;
+    // Before touching the index: a failed commit must leave the staging area as it was.
+    let sig = repo
+        .signature()
+        .context("No git identity configured (set user.name and user.email)")?;
     let mut index = repo.index()?;
     for rel in rel_paths {
         if root.join(rel).exists() {
@@ -364,12 +484,26 @@ pub fn commit_paths(root: &Path, rel_paths: &[String], message: &str) -> Result<
             index.remove_path(Path::new(rel)).with_context(|| format!("removing {rel}"))?;
         }
     }
+    for (rel, data) in partial {
+        let entry = index.get_path(Path::new(rel), 0).unwrap_or_else(|| git2::IndexEntry {
+            ctime: git2::IndexTime::new(0, 0),
+            mtime: git2::IndexTime::new(0, 0),
+            dev: 0,
+            ino: 0,
+            mode: 0o100644,
+            uid: 0,
+            gid: 0,
+            file_size: 0,
+            id: git2::Oid::zero(),
+            flags: 0,
+            flags_extended: 0,
+            path: rel.as_bytes().to_vec(),
+        });
+        index.add_frombuffer(&entry, data).with_context(|| format!("staging selected changes of {rel}"))?;
+    }
     index.write()?;
     let tree_id = index.write_tree()?;
     let tree = repo.find_tree(tree_id)?;
-    let sig = repo
-        .signature()
-        .context("No git identity configured (set user.name and user.email)")?;
     let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
     let parents: Vec<&git2::Commit> = parent.iter().collect();
     let oid = repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)?;
@@ -422,6 +556,26 @@ mod tests {
         assert_eq!((rows[4].left, rows[4].right, rows[4].kind), (Some(2), Some(4), SideKind::Same));
         // New file: everything added.
         assert!(side_by_side("", "a\nb\n").iter().all(|r| r.kind == SideKind::Added && r.left.is_none()));
+    }
+
+    #[test]
+    fn partial_staging_and_word_diff() {
+        let base = "a\nb\nc\nd\n";
+        let current = "a\nB\nc\nd\ne\n";
+        let sigs = hunk_signatures(base, current);
+        assert_eq!(sigs.len(), 2);
+        let none = std::collections::HashSet::new();
+        assert_eq!(apply_selected_hunks(base, current, &none), (current.to_string(), 2, 2));
+        let skip_second: std::collections::HashSet<u64> = [sigs[1]].into();
+        assert_eq!(apply_selected_hunks(base, current, &skip_second), ("a\nB\nc\nd\n".to_string(), 1, 2));
+        let skip_all: std::collections::HashSet<u64> = sigs.iter().copied().collect();
+        assert_eq!(apply_selected_hunks(base, current, &skip_all).0, base);
+        // Signatures survive edits elsewhere in the file.
+        assert_eq!(hunk_signatures(base, "x\na\nB\nc\nd\ne\n")[1..], sigs[..]);
+
+        let (old, new) = word_diff("let total = items.len();", "let count = items.len() + 1;");
+        assert_eq!(old.iter().map(|r| &"let total = items.len();"[r.clone()]).collect::<Vec<_>>(), ["total"]);
+        assert_eq!(new.iter().map(|r| &"let count = items.len() + 1;"[r.clone()]).collect::<Vec<_>>(), ["count", "+ 1"]);
     }
 
     fn commit(id: &str, parents: &[&str]) -> CommitInfo {

@@ -132,6 +132,10 @@ impl Workspace {
         let debug_panel = cx.new(|cx| crate::debug_panel::DebugPanel::new(debugger.clone(), cx));
         pane.update(cx, |p, _| p.debugger = Some(debugger.clone()));
         git.update(cx, |g, _| g.pane = Some(pane.downgrade()));
+        // Line-level staging: diff views tick blocks, the Git tab commits them.
+        let hunk_excluded = crate::diff_view::HunkSelection::default();
+        git.update(cx, |g, _| g.hunk_excluded = hunk_excluded.clone());
+        pane.update(cx, |p, _| p.hunk_excluded = hunk_excluded);
         debugger.update(cx, |d, cx| d.load(cx));
         let terminal = cx.new(|cx| TerminalPanel::new(root.clone(), cx));
 
@@ -161,6 +165,7 @@ impl Workspace {
             }
             PaneEvent::Changed => {
                 this.probe_active_toolchain(cx);
+                this.git.update(cx, |_, cx| cx.notify());
                 cx.notify();
             }
             PaneEvent::OpenLocation(path, line, col) => this.open_file(path.clone(), Some((*line, *col)), window, cx),
