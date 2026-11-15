@@ -403,6 +403,63 @@ pub struct OutlineItem {
     pub byte_range: Range<usize>,
 }
 
+/// Code folding regions: `(first row, last row hidden when folded)`, sorted by first row,
+/// one per first row (the largest). Any named node spanning several lines can fold — function
+/// and class bodies, blocks, multi-line calls, literals, comments. When the node's last line
+/// only closes it (`}`, `)`, `]`, `end`, `</tag>`), that line stays visible, as in VS Code.
+pub fn fold_ranges(tree: &Tree, rope: &Rope) -> Vec<(usize, usize)> {
+    let mut found: Vec<(usize, usize)> = Vec::new();
+    let mut cursor = tree.walk();
+    let mut depth = 0usize;
+    loop {
+        let node = cursor.node();
+        let start = node.start_position().row;
+        let end_pos = node.end_position();
+        // A node that ends with its newline ends at column 0 of the next line.
+        let end = if end_pos.column == 0 && end_pos.row > start { end_pos.row - 1 } else { end_pos.row };
+        // A node that begins exactly where its first named child does (Python's `block`
+        // starting at its first statement, `foo(...)` at `foo`) folds as that child or a
+        // sibling instead; taking it would fold the wrong rows from that line.
+        let wraps_first_child = node.named_child(0).is_some_and(|c| c.start_byte() == node.start_byte());
+        if depth > 0 && end > start && node.is_named() && !wraps_first_child {
+            found.push((start, end));
+        }
+        // Single-line nodes can't contain multi-line ones: don't descend.
+        if end > start && cursor.goto_first_child() {
+            depth += 1;
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return finish_folds(found, rope);
+            }
+            depth -= 1;
+        }
+    }
+}
+
+fn finish_folds(mut found: Vec<(usize, usize)>, rope: &Rope) -> Vec<(usize, usize)> {
+    found.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    found.dedup_by_key(|f| f.0);
+    found
+        .into_iter()
+        .filter_map(|(start, end)| {
+            let closes = end < rope.len_lines() && closing_line(&rope.line(end).to_string());
+            let last_hidden = if closes { end - 1 } else { end };
+            (last_hidden > start).then_some((start, last_hidden))
+        })
+        .collect()
+}
+
+/// A line that only closes a block: starts with a closing bracket, `</` or the word `end`.
+fn closing_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with(['}', ')', ']']) || t.starts_with("</") || (t.starts_with("end") && !t[3..].starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+}
+
 /// Document outline (structure view, CodeLens anchors).
 pub fn outline(tree: &Tree, rope: &Rope) -> Vec<OutlineItem> {
     let mut out = Vec::new();
@@ -567,6 +624,21 @@ mod tests {
         assert_eq!(counts.get("port"), Some(&2));
         let sel = expand_selection(&tree, 35..36).unwrap();
         assert!(sel.start <= 35 && sel.end >= 36);
+    }
+
+    #[test]
+    fn fold_ranges_keep_closing_lines_visible() {
+        let src = "fn main() {\n    let v = vec![\n        1,\n        2,\n    ];\n    println!(\"{v:?}\");\n}\n";
+        let rope = Rope::from_str(src);
+        let tree = parse(LanguageId::Rust, &rope, None).expect("parse");
+        // fn body: rows 0..=5 hidden from row 1 (the `}` on row 6 stays); vec! args: 1..=3.
+        assert_eq!(fold_ranges(&tree, &rope), vec![(0, 5), (1, 3)]);
+
+        let py = "def f(x):\n    if x:\n        return 1\n    return 2\n";
+        let rope = Rope::from_str(py);
+        let tree = parse(LanguageId::Python, &rope, None).expect("parse");
+        // Python has no closing line: the whole body hides.
+        assert_eq!(fold_ranges(&tree, &rope), vec![(0, 3), (1, 2)]);
     }
 
     #[test]

@@ -60,6 +60,8 @@ pub struct TabState {
     /// First visible line (fractional) and horizontal scroll in pixels.
     pub scroll_line: f32,
     pub scroll_x: f32,
+    /// First lines of the folded code regions.
+    pub folds: Vec<usize>,
 }
 
 /// Everything about one project's window worth restoring.

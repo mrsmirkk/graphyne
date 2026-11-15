@@ -237,7 +237,7 @@ impl EditorPane {
                 PaneItem::Editor(e) => {
                     let e = e.read(cx);
                     let (cursor, anchor, scroll_line, scroll_x) = e.view_state();
-                    TabState { kind: TabKind::File, path: e.path.clone(), cursor, anchor, scroll_line, scroll_x }
+                    TabState { kind: TabKind::File, path: e.path.clone(), cursor, anchor, scroll_line, scroll_x, folds: e.folded_rows() }
                 }
                 PaneItem::Hex(h) => TabState { kind: TabKind::File, path: Some(h.read(cx).path.clone()), ..Default::default() },
                 PaneItem::Diff(d) => TabState { kind: TabKind::Diff, path: Some(d.read(cx).path.clone()), ..Default::default() },
@@ -264,7 +264,10 @@ impl EditorPane {
                     let item = match (tab.kind, tab.path, file) {
                         (TabKind::File, Some(path), Some(Ok(Some(buffer)))) => {
                             let editor = this.new_editor(path, buffer, cx);
-                            editor.update(cx, |e, cx| e.restore_view(tab.cursor, tab.anchor, tab.scroll_line, tab.scroll_x, cx));
+                            editor.update(cx, |e, cx| {
+                                e.set_folded_rows(tab.folds, cx);
+                                e.restore_view(tab.cursor, tab.anchor, tab.scroll_line, tab.scroll_x, cx);
+                            });
                             PaneItem::Editor(editor)
                         }
                         (TabKind::File, Some(path), Some(Ok(None))) => PaneItem::Hex(cx.new(|cx| HexView::new(path, cx))),

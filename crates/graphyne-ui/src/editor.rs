@@ -23,7 +23,7 @@ use graphyne_core::secrets::SecretFinding;
 use graphyne_core::{Buffer, EditDelta, LanguageId, Selection};
 use graphyne_git::{DiffHunk, LineChange};
 use graphyne_syntax::{HighlightKind, OutlineItem, SymbolKind, Tree};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -122,6 +122,14 @@ pub struct Editor {
     /// Session restore: the buffer line to keep at the top until the user scrolls, types
     /// or moves the cursor. `N usages` rows appear later and would push the text down.
     restore_top: Option<f32>,
+    /// Foldable regions from the syntax tree: (first row, last row hidden when folded).
+    fold_ranges: Arc<Vec<(usize, usize)>>,
+    /// First rows of the folded regions.
+    folded: BTreeSet<usize>,
+    /// Rows actually hidden: the outermost folded regions, (header row, last hidden row).
+    hidden: Vec<(usize, usize)>,
+    /// Fold arrows for unfolded regions show while the mouse is over the gutter.
+    mouse_in_gutter: bool,
     tree: Option<Tree>,
     reparse_task: Option<Task<()>>,
     analysis_task: Option<Task<()>>,
@@ -183,6 +191,10 @@ impl Editor {
             autoscroll: false,
             center_on_cursor: false,
             restore_top: None,
+            fold_ranges: Arc::new(Vec::new()),
+            folded: BTreeSet::new(),
+            hidden: Vec::new(),
+            mouse_in_gutter: false,
             tree: None,
             reparse_task: None,
             analysis_task: None,
@@ -263,10 +275,13 @@ impl Editor {
     pub fn view_state(&self) -> ((usize, usize), (usize, usize), f32, f32) {
         let line_height = self.layout.as_ref().map(|l| f32::from(l.line_height)).unwrap_or_else(theme::code_line_height).max(1.);
         let display = f32::from(self.scroll_y) / line_height;
-        let mut row = display.floor() as usize;
-        while row > 0 && self.display_row(row) as f32 > display {
-            row -= 1;
+        let target = display.floor() as usize;
+        let (mut lo, mut hi) = (0usize, self.buffer.len_lines());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.display_row(mid) <= target { lo = mid + 1 } else { hi = mid }
         }
+        let row = lo.saturating_sub(1);
         let top = row as f32 + (display - self.display_row(row) as f32).clamp(0., 0.99);
         (self.buffer.row_col(self.sel.head), self.buffer.row_col(self.sel.anchor), top, f32::from(self.scroll_x))
     }
@@ -352,10 +367,11 @@ impl Editor {
                     };
                     let errors = collect_errors(&tree);
                     let lenses = build_lenses(&outline, &counts, &usages);
-                    Some((tree, outline, errors, lenses, counts))
+                    let folds = graphyne_syntax::fold_ranges(&tree, &rope);
+                    Some((tree, outline, errors, lenses, counts, folds))
                 })
                 .await;
-            let Some((tree, outline, errors, lenses, counts)) = result else { return };
+            let Some((tree, outline, errors, lenses, counts, folds)) = result else { return };
             this.update(cx, |this, cx| {
                 if this.buffer.version() == version {
                     this.tree = Some(tree);
@@ -363,6 +379,9 @@ impl Editor {
                     this.syntax_errors = Arc::new(errors);
                     this.lenses = Arc::new(lenses);
                     this.ident_counts = Arc::new(counts);
+                    this.fold_ranges = Arc::new(folds);
+                    this.rebuild_hidden();
+                    this.apply_restore_top();
                     cx.notify();
                 }
             })
@@ -521,6 +540,9 @@ impl Editor {
                 graphyne_syntax::apply_edit(tree, delta);
             }
         }
+        for d in deltas {
+            self.shift_folds(d.start_point.row, d.old_end_point.row, d.new_end_point.row);
+        }
         self.after_lsp_edit(cx);
         self.expand_stack.clear();
         self.diff_popup = None;
@@ -599,7 +621,13 @@ impl Editor {
         let (row, col) = self.buffer.row_col(self.sel.head);
         let goal = self.goal_col.unwrap_or(col);
         let last = self.buffer.len_lines().saturating_sub(1) as isize;
-        let target = row as isize + delta;
+        let mut target = row as isize + delta;
+        // Step over folded regions: down lands after them, up on their header line.
+        if target >= 0 && target <= last {
+            if let Some((header, last_hidden)) = self.hidden_span(target as usize) {
+                target = if delta > 0 { last_hidden as isize + 1 } else { header as isize };
+            }
+        }
         let pos = if target < 0 {
             0
         } else if target > last {
@@ -1156,7 +1184,7 @@ impl Editor {
     /// Right click on the line-number area: edit that line's breakpoint.
     fn on_right_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(layout) = self.layout.as_ref() else { return };
-        if event.position.x >= layout.bounds.left() + layout.gutter_width - px(16.) {
+        if event.position.x >= layout.bounds.left() + layout.gutter_width - px(16. + FOLD_W) {
             return;
         }
         let row = layout.rows.iter().find_map(|r| match &r.kind {
@@ -1473,7 +1501,7 @@ impl Editor {
 
     fn gutter_hunk_at(&self, position: Point<Pixels>) -> Option<usize> {
         let layout = self.layout.as_ref()?;
-        if position.x > layout.bounds.left() + layout.gutter_width || position.x < layout.bounds.left() + layout.gutter_width - px(16.) {
+        if position.x > layout.bounds.left() + layout.gutter_width - px(FOLD_W) || position.x < layout.bounds.left() + layout.gutter_width - px(16. + FOLD_W) {
             return None;
         }
         let row = layout.rows.iter().find_map(|r| match &r.kind {
@@ -1498,9 +1526,13 @@ impl Editor {
             return;
         }
         self.diff_popup = None;
+        if let Some(row) = self.fold_click_row(event.position) {
+            self.toggle_fold(row, cx);
+            return;
+        }
         // Click on the line-number area toggles a breakpoint (JetBrains style).
         if let Some(layout) = self.layout.as_ref() {
-            if event.position.x < layout.bounds.left() + layout.gutter_width - px(16.) {
+            if event.position.x < layout.bounds.left() + layout.gutter_width - px(16. + FOLD_W) {
                 let row = layout.rows.iter().find_map(|r| match &r.kind {
                     RowKind::Line { row, .. } if event.position.y >= r.y && event.position.y < r.y + layout.line_height => Some(*row),
                     _ => None,
@@ -1544,7 +1576,28 @@ impl Editor {
         cx.notify();
     }
 
+    /// The fold header row under `position` when it is on a fold arrow or a `⋯` marker.
+    fn fold_click_row(&self, position: Point<Pixels>) -> Option<usize> {
+        let layout = self.layout.as_ref()?;
+        let (row, line) = layout.rows.iter().find_map(|r| match &r.kind {
+            RowKind::Line { row, line, .. } if position.y >= r.y && position.y < r.y + layout.line_height => Some((*row, line)),
+            _ => None,
+        })?;
+        let left = layout.bounds.left();
+        let on_arrow = position.x >= left + layout.gutter_width - px(FOLD_W) && position.x < left + layout.gutter_width;
+        let marker_x = layout.text_x + line.width + layout.char_width;
+        let on_marker = self.folded.contains(&row) && position.x >= marker_x && position.x < marker_x + layout.char_width * 3. + px(6.);
+        ((on_arrow && self.fold_range_at(row).is_some()) || on_marker).then_some(row)
+    }
+
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(layout) = self.layout.as_ref() {
+            let in_gutter = event.position.x >= layout.bounds.left() && event.position.x < layout.bounds.left() + layout.gutter_width;
+            if in_gutter != self.mouse_in_gutter {
+                self.mouse_in_gutter = in_gutter;
+                cx.notify();
+            }
+        }
         let Some((mode, anchor)) = self.drag else {
             if event.pressed_button.is_none() {
                 self.on_hover_move(event.position, cx);
@@ -1593,7 +1646,8 @@ impl Editor {
     }
 
     fn total_display_rows(&self) -> usize {
-        self.buffer.len_lines() + self.lenses.len()
+        let hidden: usize = self.hidden.iter().map(|(s, e)| e - s).sum();
+        self.buffer.len_lines() - hidden.min(self.buffer.len_lines()) + self.lenses.len() - self.hidden_lenses_before(usize::MAX)
     }
 
     /// An extension registered or changed languages: switch this file's language if needed.
@@ -1650,7 +1704,163 @@ impl Editor {
     }
 
     fn display_row(&self, row: usize) -> usize {
-        row + self.lenses.partition_point(|(r, _)| *r <= row)
+        // A hidden row shows where its fold header is.
+        let row = self.hidden_span(row).map_or(row, |(header, _)| header);
+        let hidden_rows: usize = self.hidden.iter().take_while(|(_, e)| *e < row).map(|(s, e)| e - s).sum();
+        row - hidden_rows + self.lenses.partition_point(|(r, _)| *r <= row) - self.hidden_lenses_before(row)
+    }
+
+    // ----- code folding -----
+
+    /// The folded region hiding `row`, if any: (header row, last hidden row).
+    fn hidden_span(&self, row: usize) -> Option<(usize, usize)> {
+        let ix = self.hidden.partition_point(|(s, _)| *s < row);
+        ix.checked_sub(1).map(|i| self.hidden[i]).filter(|(_, e)| row <= *e)
+    }
+
+    /// `N usages` rows that sit on hidden lines before `row`.
+    fn hidden_lenses_before(&self, row: usize) -> usize {
+        self.hidden
+            .iter()
+            .take_while(|(_, e)| *e < row)
+            .map(|(s, e)| self.lenses.partition_point(|(r, _)| *r <= *e) - self.lenses.partition_point(|(r, _)| *r <= *s))
+            .sum()
+    }
+
+    fn fold_range_at(&self, row: usize) -> Option<(usize, usize)> {
+        self.fold_ranges.binary_search_by_key(&row, |(s, _)| *s).ok().map(|ix| self.fold_ranges[ix])
+    }
+
+    /// Recompute the hidden rows from the folded headers and the current fold regions.
+    fn rebuild_hidden(&mut self) {
+        if self.tree.is_none() {
+            // Not parsed yet (e.g. restored folds): they apply once the regions are known.
+            self.hidden.clear();
+            return;
+        }
+        let ranges = self.fold_ranges.clone();
+        // A fold whose region is gone (edited away) is dropped.
+        self.folded.retain(|s| ranges.binary_search_by_key(s, |(r, _)| *r).is_ok());
+        let mut hidden: Vec<(usize, usize)> = Vec::new();
+        for s in &self.folded {
+            let Ok(ix) = ranges.binary_search_by_key(s, |(r, _)| *r) else { continue };
+            if hidden.last().is_some_and(|(_, e)| *s <= *e) {
+                continue; // inside an outer folded region
+            }
+            hidden.push(ranges[ix]);
+        }
+        self.hidden = hidden;
+    }
+
+    /// Lines were replaced (`start..=old_end` became `start..=new_end`): move the folds below.
+    fn shift_folds(&mut self, start: usize, old_end: usize, new_end: usize) {
+        if old_end == new_end || (self.folded.is_empty() && self.fold_ranges.is_empty()) {
+            return;
+        }
+        let shift = |r: usize| -> Option<usize> {
+            if r <= start {
+                Some(r)
+            } else if r <= old_end {
+                None
+            } else {
+                Some(r - old_end + new_end)
+            }
+        };
+        self.folded = self.folded.iter().filter_map(|r| shift(*r)).collect();
+        let ranges: Vec<(usize, usize)> = self
+            .fold_ranges
+            .iter()
+            .filter_map(|(s, e)| {
+                let s2 = shift(*s)?;
+                let e2 = shift(*e).unwrap_or(new_end).max(s2);
+                (e2 > s2).then_some((s2, e2))
+            })
+            .collect();
+        self.fold_ranges = Arc::new(ranges);
+        self.rebuild_hidden();
+    }
+
+    /// Fold or unfold the region that starts on `row` (gutter arrow, `⋯` marker).
+    fn toggle_fold(&mut self, row: usize, cx: &mut Context<Self>) {
+        if !self.folded.remove(&row) {
+            if self.fold_range_at(row).is_none() {
+                return;
+            }
+            self.folded.insert(row);
+        }
+        self.after_fold_change(cx);
+    }
+
+    fn after_fold_change(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_hidden();
+        // The caret never stays on a hidden line: it goes to the end of the fold's header.
+        let row = self.buffer.char_to_line(self.sel.head);
+        if let Some((header, _)) = self.hidden_span(row) {
+            let pos = self.buffer.char_at(header, usize::MAX);
+            self.sel = Selection::caret(pos);
+        }
+        self.restore_top = None;
+        self.clamp_scroll();
+        cx.notify();
+    }
+
+    /// The caret moved onto a hidden line (search, go to, undo…): unfold around it.
+    fn reveal_caret(&mut self) {
+        let row = self.buffer.char_to_line(self.sel.head);
+        if self.hidden_span(row).is_none() {
+            return;
+        }
+        let ranges = self.fold_ranges.clone();
+        self.folded.retain(|s| !ranges.binary_search_by_key(s, |(r, _)| *r).is_ok_and(|ix| *s < row && row <= ranges[ix].1));
+        self.rebuild_hidden();
+    }
+
+    /// Folded headers, for the session.
+    pub fn folded_rows(&self) -> Vec<usize> {
+        self.folded.iter().copied().collect()
+    }
+
+    /// Restore folds from the session (applied once the file is parsed).
+    pub fn set_folded_rows(&mut self, rows: Vec<usize>, cx: &mut Context<Self>) {
+        self.folded = rows.into_iter().collect();
+        self.rebuild_hidden();
+        cx.notify();
+    }
+
+    /// Ctrl+-: fold the innermost unfolded region around the caret; again folds the next one out.
+    fn fold_region(&mut self, _: &FoldRegion, _: &mut Window, cx: &mut Context<Self>) {
+        let row = self.buffer.char_to_line(self.sel.head);
+        let target = self.fold_ranges.iter().filter(|(s, e)| *s <= row && row <= *e + 1 && !self.folded.contains(s)).map(|(s, _)| *s).max();
+        if let Some(s) = target {
+            self.folded.insert(s);
+            self.after_fold_change(cx);
+        }
+    }
+
+    /// Ctrl+=: unfold the region on the caret's line, or the innermost folded one around it.
+    fn unfold_region(&mut self, _: &UnfoldRegion, _: &mut Window, cx: &mut Context<Self>) {
+        let row = self.buffer.char_to_line(self.sel.head);
+        let target = if self.folded.contains(&row) {
+            Some(row)
+        } else {
+            self.fold_ranges.iter().filter(|(s, e)| *s <= row && row <= *e + 1 && self.folded.contains(s)).map(|(s, _)| *s).max()
+        };
+        if let Some(s) = target {
+            self.folded.remove(&s);
+            self.after_fold_change(cx);
+        }
+    }
+
+    /// Ctrl+Shift+-: fold everything.
+    fn fold_all(&mut self, _: &FoldAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.folded = self.fold_ranges.iter().map(|(s, _)| *s).collect();
+        self.after_fold_change(cx);
+    }
+
+    /// Ctrl+Shift+=: unfold everything.
+    fn unfold_all(&mut self, _: &UnfoldAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.folded.clear();
+        self.after_fold_change(cx);
     }
 
     fn clamp_scroll(&mut self) {
@@ -1890,6 +2100,8 @@ struct PaintRow {
     row: Option<usize>,
     /// Debugger inline values painted after the line end.
     inline: Option<ShapedLine>,
+    /// Fold arrow: Some(true) folded (shows `⋯` after the text), Some(false) foldable.
+    fold: Option<bool>,
 }
 
 struct PaintState {
@@ -1910,6 +2122,7 @@ struct PaintState {
     number_runs_font: gpui::Font,
     breakpoints: Vec<(usize, BpKind)>,
     exec_line: Option<usize>,
+    show_fold_arrows: bool,
 }
 
 fn editor_element(editor: Entity<Editor>) -> impl IntoElement {
@@ -1928,7 +2141,8 @@ fn editor_element(editor: Entity<Editor>) -> impl IntoElement {
             // Autoscroll before computing the viewport.
             prepaint_editor.update(cx, |e, _| {
                 let digits = (e.buffer.len_lines().max(1) as f32).log10().floor() as usize + 1;
-                let gutter = px(18.) + char_width * digits.max(3) as f32 + px(22.);
+                let gutter = px(18.) + char_width * digits.max(3) as f32 + px(22. + FOLD_W);
+                e.reveal_caret();
                 if e.autoscroll || e.center_on_cursor {
                     e.restore_top = None;
                     let (row, col) = e.buffer.row_col(e.sel.head);
@@ -1974,7 +2188,7 @@ fn editor_element(editor: Entity<Editor>) -> impl IntoElement {
                     .unwrap_or(exec.saturating_sub(30))
             });
             let digits = (e.buffer.len_lines().max(1) as f32).log10().floor() as usize + 1;
-            let gutter_width = px(18.) + char_width * digits.max(3) as f32 + px(22.);
+            let gutter_width = px(18.) + char_width * digits.max(3) as f32 + px(22. + FOLD_W);
             let text_x = bounds.left() + gutter_width - e.scroll_x;
             let total_rows = e.total_display_rows();
             let first_display = (e.scroll_y / line_height).floor().max(0.) as usize;
@@ -1992,6 +2206,10 @@ fn editor_element(editor: Entity<Editor>) -> impl IntoElement {
             let mut items: Vec<(usize, Option<usize>, Option<SharedString>)> = Vec::new(); // (display_row, buffer_row, lens)
             let mut r = lo;
             while r < len_lines && items.len() < visible + 1 {
+                if let Some((_, last_hidden)) = e.hidden_span(r) {
+                    r = last_hidden + 1;
+                    continue;
+                }
                 let d = e.display_row(r);
                 if let Ok(ix) = e.lenses.binary_search_by_key(&r, |(lr, _)| *lr) {
                     if d >= 1 && d - 1 >= first_display {
@@ -2033,7 +2251,7 @@ fn editor_element(editor: Entity<Editor>) -> impl IntoElement {
                         e.lenses.iter().find(|(lr, l)| *l == label && e.display_row(*lr) == d + 1).map(|(lr, _)| *lr).unwrap_or(0)
                     });
                     let indent = e.buffer.indentation(next_row).chars().count();
-                    rows.push(PaintRow { y, kind: RowKind::Lens { label, indent_x: char_width * indent as f32 }, row: None, inline: None });
+                    rows.push(PaintRow { y, kind: RowKind::Lens { label, indent_x: char_width * indent as f32 }, row: None, inline: None, fold: None });
                     continue;
                 }
                 let Some(row) = buffer_row else { continue };
@@ -2148,6 +2366,7 @@ fn editor_element(editor: Entity<Editor>) -> impl IntoElement {
                     kind: RowKind::Line { row, line: shaped, col_to_byte: Arc::new(col_to_byte), char_start: Arc::new(char_start) },
                     row: Some(row),
                     inline,
+                    fold: e.fold_range_at(row).map(|_| e.folded.contains(&row)),
                 });
             }
 
@@ -2171,6 +2390,7 @@ fn editor_element(editor: Entity<Editor>) -> impl IntoElement {
                 selection: sel,
                 focused,
                 show_cursor: e.cursor_visible,
+                show_fold_arrows: e.mouse_in_gutter,
                 hunks: e.hunks.clone(),
                 cursor_row,
                 scrollbar,
@@ -2235,8 +2455,19 @@ fn editor_element(editor: Entity<Editor>) -> impl IntoElement {
                     match &r.kind {
                         RowKind::Line { line, .. } => {
                             let _ = line.paint(point(state.text_x, r.y), lh, window, cx);
+                            let mut after = state.text_x + line.width + state.char_width * 3.;
+                            if r.fold == Some(true) {
+                                // `⋯` marker for the hidden lines (click to unfold).
+                                let x = state.text_x + line.width + state.char_width;
+                                let w = state.char_width * 3. + px(6.);
+                                window.paint_quad(fill(Bounds::new(point(x, r.y + px(3.)), size(w, lh - px(6.))), color_a(c::TEXT_DIM, 0.28)).corner_radii(px(4.)));
+                                let run = TextRun { len: "⋯".len(), font: state.number_runs_font.clone(), color: color(c::TEXT_MUTED), background_color: None, underline: None, strikethrough: None };
+                                let dots = window.text_system().shape_line("⋯".into(), px(theme::code_size()), &[run], None);
+                                let _ = dots.paint(point(x + (w - dots.width) / 2., r.y), lh, window, cx);
+                                after = x + w + state.char_width * 2.;
+                            }
                             if let Some(inline) = &r.inline {
-                                let _ = inline.paint(point(state.text_x + line.width + state.char_width * 3., r.y), lh, window, cx);
+                                let _ = inline.paint(point(after, r.y), lh, window, cx);
                             }
                         }
                         RowKind::Lens { label, indent_x } => {
@@ -2304,10 +2535,21 @@ fn editor_element(editor: Entity<Editor>) -> impl IntoElement {
                 let col = if row == state.cursor_row { color(c::TEXT_MUTED) } else { color(c::TEXT_FAINT) };
                 let run = TextRun { len: label.len(), font: state.number_runs_font.clone(), color: col, background_color: None, underline: None, strikethrough: None };
                 let shaped = window.text_system().shape_line(label, num_size, &[run], None);
-                let x = bounds.left() + state.gutter_width - px(20.) - shaped.width;
+                let x = bounds.left() + state.gutter_width - px(20. + FOLD_W) - shaped.width;
                 let _ = shaped.paint(point(x, r.y + px(1.)), lh, window, cx);
+                if let Some(folded) = r.fold {
+                    if folded || state.show_fold_arrows {
+                        let c = point(bounds.left() + state.gutter_width - px(FOLD_W / 2. + 2.), r.y + lh / 2.);
+                        let p = |x: f32, y: f32| point(c.x + px(x), c.y + px(y));
+                        if folded {
+                            paint_polygon(window, &[p(-2.5, -4.), p(3., 0.), p(-2.5, 4.)], color(c::TEXT_MUTED));
+                        } else {
+                            paint_polygon(window, &[p(-4., -2.5), p(4., -2.5), p(0., 3.)], color(c::TEXT_FAINT));
+                        }
+                    }
+                }
                 for h in state.hunks.iter() {
-                    let marker_x = bounds.left() + state.gutter_width - px(12.);
+                    let marker_x = bounds.left() + state.gutter_width - px(12. + FOLD_W);
                     match h.kind {
                         LineChange::Added | LineChange::Modified if h.new.contains(&(row as u32)) => {
                             let col = if h.kind == LineChange::Added { color(c::GIT_ADDED) } else { color(c::GIT_MODIFIED) };
@@ -2349,6 +2591,9 @@ const BP_RED: u32 = 0xE5534B;
 const BP_LOG: u32 = 0xE08A4A;
 
 /// Execution-point arrow (shaft + head) centred on `c`; `scale` 1.0 = 13 × 11 px.
+/// Width of the fold-arrow column at the right edge of the gutter.
+const FOLD_W: f32 = 14.;
+
 fn exec_arrow(c: Point<Pixels>, scale: f32) -> [Point<Pixels>; 7] {
     let p = |x: f32, y: f32| point(c.x + px(x * scale), c.y + px(y * scale));
     [p(-6.5, -2.5), p(0.5, -2.5), p(0.5, -5.5), p(6.5, 0.), p(0.5, 5.5), p(0.5, 2.5), p(-6.5, 2.5)]
@@ -2640,6 +2885,10 @@ impl Render for Editor {
             .on_action(cx.listener(Self::duplicate_line))
             .on_action(cx.listener(Self::delete_line))
             .on_action(cx.listener(Self::toggle_comment))
+            .on_action(cx.listener(Self::fold_region))
+            .on_action(cx.listener(Self::unfold_region))
+            .on_action(cx.listener(Self::fold_all))
+            .on_action(cx.listener(Self::unfold_all))
             .on_action(cx.listener(Self::extend_selection))
             .on_action(cx.listener(Self::shrink_selection))
             .on_action(cx.listener(Self::move_line_up))
