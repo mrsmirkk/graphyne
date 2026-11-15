@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Menu {
     Projects,
+    Run,
     App,
 }
 
@@ -99,6 +100,8 @@ pub struct Workspace {
     show_notifications: bool,
     menu: Option<Menu>,
     recent: Vec<PathBuf>,
+    /// Run-menu presets for this project, with "installed" flags.
+    run_presets: Vec<(&'static graphyne_core::presets::Preset, bool)>,
     last_shift: Option<Instant>,
     shift_down: bool,
     left_width: Pixels,
@@ -241,6 +244,7 @@ impl Workspace {
             show_notifications: false,
             menu: None,
             recent: Vec::new(),
+            run_presets: Vec::new(),
             last_shift: None,
             shift_down: false,
             left_width: px(270.),
@@ -651,6 +655,31 @@ impl Workspace {
     }
 
     /// Universal One-Click Run: auto-save everything, then route by file type.
+    /// Run-menu preset in its own terminal tab (detachable like any terminal). Commands that
+    /// need a target are typed without Enter so the user can append host / URL / binary.
+    fn run_preset(&mut self, preset: &'static graphyne_core::presets::Preset, window: &mut Window, cx: &mut Context<Self>) {
+        let saves = self.pane.update(cx, |p, cx| p.save_all(cx));
+        let line = if preset.needs_target { preset.command.to_string() } else { format!("{}\r", preset.command) };
+        let cwd = self.root.clone();
+        if self.detached.is_none() {
+            self.bottom = true;
+        }
+        self.bottom_view = BottomView::Terminal;
+        cx.spawn_in(window, async move |this, cx| {
+            for s in saves {
+                s.await;
+            }
+            this.update_in(cx, |this, window, cx| {
+                this.terminal.update(cx, |t, cx| t.run_in_tab(preset.label, cwd, &line, cx));
+                this.terminal.read(cx).focus_active(window, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn run_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.pane.read(cx).active_editor() else {
             self.notify_user("Open a file to run it", true, cx);
@@ -906,6 +935,25 @@ impl Workspace {
                 icon_button("run", Icon::Play, color(c::TEXT))
                     .tooltip(tooltip("Run", Some("Shift+F10")))
                     .on_click(cx.listener(|this, _, w, cx| this.run_active(w, cx))),
+            )
+            .child(
+                div()
+                    .id("run-menu")
+                    .occlude()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .w(px(14.))
+                    .h(px(28.))
+                    .ml(px(-2.))
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .when(self.menu == Some(Menu::Run), |d| d.bg(color(c::HOVER)))
+                    .hover(|s| s.bg(color(c::HOVER)))
+                    .child(icon(Icon::ChevronDown, 12., tint))
+                    .tooltip(tooltip("Run Presets", None))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Run, cx))),
             )
             .child(
                 icon_button("debug", Icon::Bug, if self.debugger.read(cx).is_live() { color(c::GREEN) } else { color(c::TEXT) })
@@ -1183,6 +1231,25 @@ impl Workspace {
     fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
         self.show_notifications = false;
         self.menu = if self.menu == Some(menu) { None } else { Some(menu) };
+        if self.menu == Some(Menu::Run) {
+            let root = self.root.clone();
+            cx.spawn(async move |this, cx| {
+                let presets = cx
+                    .background_spawn(async move {
+                        graphyne_core::presets::applicable(&root)
+                            .into_iter()
+                            .map(|p| (p, graphyne_lsp::servers::which(p.program).is_some()))
+                            .collect::<Vec<_>>()
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.run_presets = presets;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
         if self.menu == Some(Menu::Projects) {
             cx.spawn(async move |this, cx| {
                 let recent = cx.background_spawn(async move { graphyne_core::recent::load() }).await;
@@ -1263,6 +1330,34 @@ impl Workspace {
                             crate::open_workspace(path.clone(), |_| {}, cx);
                             cx.notify();
                         }))
+                    }))
+            }
+            Menu::Run => {
+                let presets = self.run_presets.clone();
+                panel
+                    .right(px(214.))
+                    .w(px(380.))
+                    .child(item("menu-run-file", "Run Current File".into(), None, Some("Shift+F10")).on_click(cx.listener(|this, _, window, cx| {
+                        this.menu = None;
+                        this.run_active(window, cx);
+                    })))
+                    .child(section("AUDIT & REVERSE ENGINEERING"))
+                    .when(presets.is_empty(), |d| d.child(div().px(px(10.)).py(px(6.)).text_color(color(c::TEXT_DIM)).child("Checking installed tools…")))
+                    .children(presets.into_iter().enumerate().map(|(ix, (preset, installed))| {
+                        let detail: SharedString = if installed {
+                            if preset.needs_target { format!("{}<target>", preset.command).into() } else { preset.command.into() }
+                        } else {
+                            format!("not installed — {}", preset.install_hint).into()
+                        };
+                        let row = item("menu-preset", preset.label.into(), Some(detail), None).id(("menu-preset", ix));
+                        if installed {
+                            row.on_click(cx.listener(move |this, _, window, cx| {
+                                this.menu = None;
+                                this.run_preset(preset, window, cx);
+                            }))
+                        } else {
+                            row.opacity(0.5).cursor_default()
+                        }
                     }))
             }
             Menu::App => panel
