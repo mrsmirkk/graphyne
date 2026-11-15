@@ -1558,6 +1558,21 @@ impl Editor {
         self.buffer.len_lines() + self.lenses.len()
     }
 
+    /// An extension registered or changed languages: switch this file's language if needed.
+    pub fn redetect_language(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.path.clone() else { return };
+        let lang = LanguageId::from_path(&path);
+        // Same id but a grammar may have arrived: reparse extension languages anyway.
+        if lang == self.language && !matches!(lang, LanguageId::Plugin(_)) {
+            return;
+        }
+        self.language = lang;
+        self.tree = None;
+        self.lsp_init(cx);
+        self.schedule_reparse(cx);
+        cx.notify();
+    }
+
     /// Snapshot for `graphyne.buffer.*` (text omitted for very large files).
     pub fn lua_context(&self, ctx: &mut graphyne_lua::EditorContext) {
         let (row, col) = self.buffer.row_col(self.sel.head);

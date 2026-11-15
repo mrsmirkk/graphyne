@@ -317,7 +317,7 @@ pub fn side_by_side(base: &str, current: &str) -> Vec<SideRow> {
     let (old_total, new_total) = (base.lines().count() as u32, current.lines().count() as u32);
     let mut rows = Vec::new();
     let (mut old, mut new) = (0u32, 0u32);
-    let mut same_until = |rows: &mut Vec<SideRow>, old: &mut u32, new: &mut u32, old_end: u32, new_end: u32| {
+    let same_until = |rows: &mut Vec<SideRow>, old: &mut u32, new: &mut u32, old_end: u32, new_end: u32| {
         while *old < old_end && *new < new_end {
             rows.push(SideRow { left: Some(*old), right: Some(*new), kind: SideKind::Same, hunk: None });
             *old += 1;

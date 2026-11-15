@@ -1,16 +1,24 @@
 //! Graphyne plugin engine (spec §8): a LuaJIT VM on its own thread.
 //!
-//! - `~/.config/graphyne/init.lua` (trusted, full standard library) and plugins from
-//!   `~/.config/graphyne/plugins/` (`name.lua` or `name/init.lua`, sandboxed).
-//! - Hot reload: any `.lua` change in the config folder rebuilds the VM from scratch.
+//! Extensions work like VS Code / JetBrains plugins: each one is a folder in `plugins/`
+//! next to `graphyne.exe` with an `init.lua` and an optional `plugin.json` (name, version,
+//! description, author, requested permissions). They can add themes
+//! (`graphyne.themes.register`), languages with their own tree-sitter grammar, language
+//! server and run command (`graphyne.languages.register`), key bindings, panel tabs…
+//! The user's own `~/.config/graphyne/init.lua` runs first, trusted.
+//!
+//! - `~/.config/graphyne/plugins.json` keeps which extensions are disabled, the permissions
+//!   granted to each and the chosen theme (written by the IDE's Plugins page).
+//! - Hot reload: any `.lua` / `.json` / `.scm` change in either folder rebuilds the VM.
 //! - The IDE never waits for Lua: it sends [`ToLua`] messages and reacts to [`FromLua`]
 //!   events. A script stuck in a loop blocks only this thread; a count hook stops callbacks
 //!   that run longer than [`CALLBACK_BUDGET`]. The JIT compiler is off by default because
 //!   compiled loops never reach that hook; init.lua can turn it on with `jit.on()`.
-//! - Sandbox for plugins: no `os.execute` / `os.exit` / `os.remove` …, no `io.popen`, no
+//! - Sandbox for extensions: no `os.execute` / `os.exit` / `os.remove` …, no `io.popen`, no
 //!   `ffi`, `debug`, `getfenv`/`setfenv`, `package`; `load`/`loadstring` keep the sandbox
-//!   and refuse bytecode; `require` only loads modules from the plugin's own folder.
-//!   `graphyne.plugins.allow("name", { "os", "io", "ffi" })` in init.lua lifts parts of it.
+//!   and refuse bytecode; `require` only loads modules from the extension's own folder.
+//!   Permissions "os", "io", "ffi" lift parts of it; "native" allows loading a grammar
+//!   library (native code), so it is never granted implicitly.
 
 use mlua::chunk::ChunkMode;
 use mlua::{Function, HookTriggers, Lua, LuaOptions, StdLib, Table, Value, VmState};
@@ -74,6 +82,122 @@ pub enum FromLua {
     Edit(BufferEdit),
     OpenFile { path: String, line: Option<usize> },
     Setting { key: String, value: SettingValue },
+    /// Every extension found in the plugins folder, after each load.
+    Plugins(Vec<PluginInfo>),
+    Theme(ThemeSpec),
+    Language(LanguageSpec),
+}
+
+/// One extension as the Plugins page shows it.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct PluginInfo {
+    /// Folder name — the stable key used in plugins.json.
+    pub id: String,
+    pub name: String,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub folder: PathBuf,
+    pub enabled: bool,
+    pub loaded: bool,
+    pub error: Option<String>,
+    /// From plugin.json "permissions".
+    pub requested: Vec<String>,
+    pub granted: Vec<String>,
+    /// What it registered: "Theme: Nord", "Language: Zig (.zig)", "Key: ctrl-alt-d"…
+    pub provides: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThemeSpec {
+    pub name: String,
+    /// UI colour tokens (`canvas`, `island`, `text`, `accent`…) → 0xRRGGBB.
+    pub ui: Vec<(String, u32)>,
+    /// Syntax tokens (`keyword`, `string`, `comment`…) → 0xRRGGBB.
+    pub syntax: Vec<(String, u32)>,
+    pub plugin: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GrammarSpec {
+    /// Native library exporting the tree-sitter language function.
+    pub library: PathBuf,
+    /// e.g. `tree_sitter_zig`.
+    pub symbol: String,
+    /// Contents of the highlights query.
+    pub highlights: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LanguageSpec {
+    pub name: String,
+    pub extensions: Vec<String>,
+    pub file_names: Vec<String>,
+    pub line_comment: Option<String>,
+    /// Language server: program and arguments.
+    pub lsp: Option<(String, Vec<String>)>,
+    /// Run command; `{file}`, `{dir}`, `{name}` are substituted.
+    pub run: Option<String>,
+    pub grammar: Option<GrammarSpec>,
+    /// Why a declared grammar was not passed on (missing "native" permission, bad path).
+    pub grammar_error: Option<String>,
+    pub plugin: Option<String>,
+}
+
+/// `plugins.json`: disabled extensions, granted permissions, chosen theme.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PluginState {
+    pub disabled: std::collections::BTreeSet<String>,
+    pub permissions: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    pub theme: Option<String>,
+}
+
+impl PluginState {
+    pub fn file(config_dir: &Path) -> PathBuf {
+        config_dir.join("plugins.json")
+    }
+
+    pub fn load(config_dir: &Path) -> Self {
+        let Ok(text) = std::fs::read_to_string(Self::file(config_dir)) else { return Self::default() };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return Self::default() };
+        let strings = |v: &serde_json::Value| -> Vec<String> { v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default() };
+        let mut st = Self { theme: v["theme"].as_str().map(str::to_string), ..Default::default() };
+        st.disabled.extend(strings(&v["disabled"]));
+        if let Some(map) = v["permissions"].as_object() {
+            for (id, perms) in map {
+                st.permissions.insert(id.clone(), strings(perms).into_iter().collect());
+            }
+        }
+        st
+    }
+
+    pub fn save(&self, config_dir: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(config_dir)?;
+        let v = serde_json::json!({ "disabled": self.disabled, "permissions": self.permissions, "theme": self.theme });
+        std::fs::write(Self::file(config_dir), serde_json::to_string_pretty(&v).unwrap_or_default())
+    }
+}
+
+/// Where the VM looks for files.
+#[derive(Clone, Debug)]
+pub struct LuaDirs {
+    /// init.lua and plugins.json.
+    pub config: PathBuf,
+    /// One folder per extension.
+    pub plugins: PathBuf,
+}
+
+impl LuaDirs {
+    /// `~/.config/graphyne` (`GRAPHYNE_CONFIG_DIR` overrides) and `plugins/` next to the
+    /// executable (`GRAPHYNE_PLUGINS_DIR` overrides).
+    pub fn default_dirs() -> Self {
+        let env_dir = |k: &str| std::env::var_os(k).filter(|d| !d.is_empty()).map(PathBuf::from);
+        let config = env_dir("GRAPHYNE_CONFIG_DIR").unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config").join("graphyne"));
+        let plugins = env_dir("GRAPHYNE_PLUGINS_DIR").unwrap_or_else(|| {
+            std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("plugins"))).unwrap_or_else(|| config.join("plugins"))
+        });
+        Self { config, plugins }
+    }
 }
 
 /// Snapshot of the active editor, sent with every callback (`graphyne.buffer.*` reads it).
@@ -114,27 +238,18 @@ fn next_id() -> u64 {
 pub struct LuaHost {
     tx: flume::Sender<ToLua>,
     events: flume::Receiver<FromLua>,
-    config_dir: PathBuf,
-    watcher: Option<notify::RecommendedWatcher>,
+    dirs: LuaDirs,
+    watchers: Vec<notify::RecommendedWatcher>,
 }
 
 impl LuaHost {
-    /// `~/.config/graphyne` on every platform (the spec's location); `GRAPHYNE_CONFIG_DIR`
-    /// overrides it (portable installs, tests).
-    pub fn default_config_dir() -> PathBuf {
-        if let Some(dir) = std::env::var_os("GRAPHYNE_CONFIG_DIR").filter(|d| !d.is_empty()) {
-            return PathBuf::from(dir);
-        }
-        dirs::home_dir().unwrap_or_default().join(".config").join("graphyne")
-    }
-
-    /// Spawn the VM thread and load init.lua + plugins.
-    pub fn start(config_dir: PathBuf) -> Self {
+    /// Spawn the VM thread and load init.lua + extensions.
+    pub fn start(dirs: LuaDirs) -> Self {
         let (tx, rx) = flume::unbounded();
         let (etx, erx) = flume::unbounded();
-        let dir = config_dir.clone();
-        let _ = std::thread::Builder::new().name("graphyne-lua".into()).spawn(move || vm_thread(dir, rx, etx));
-        let mut host = Self { tx, events: erx, config_dir, watcher: None };
+        let thread_dirs = dirs.clone();
+        let _ = std::thread::Builder::new().name("graphyne-lua".into()).spawn(move || vm_thread(thread_dirs, rx, etx));
+        let mut host = Self { tx, events: erx, dirs, watchers: Vec::new() };
         host.watch();
         host.send(ToLua::Reload);
         host
@@ -148,37 +263,42 @@ impl LuaHost {
         self.events.clone()
     }
 
-    pub fn config_dir(&self) -> &Path {
-        &self.config_dir
+    pub fn dirs(&self) -> &LuaDirs {
+        &self.dirs
     }
 
     pub fn init_file(&self) -> PathBuf {
-        self.config_dir.join("init.lua")
+        self.dirs.config.join("init.lua")
     }
 
     pub fn plugins_dir(&self) -> PathBuf {
-        self.config_dir.join("plugins")
+        self.dirs.plugins.clone()
     }
 
-    /// Watch the config folder for `.lua` changes (call again once the folder exists).
+    /// Watch both folders for script / manifest / query changes (call again once a folder
+    /// has been created).
     pub fn watch(&mut self) {
-        if self.watcher.is_some() || !self.config_dir.is_dir() {
+        use notify::Watcher;
+        let folders = [self.dirs.config.clone(), self.dirs.plugins.clone()];
+        if self.watchers.len() == folders.iter().filter(|d| d.is_dir()).count() {
             return;
         }
-        use notify::Watcher;
-        let tx = self.tx.clone();
-        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            let Ok(ev) = res else { return };
-            if matches!(ev.kind, notify::EventKind::Access(_)) {
-                return;
-            }
-            if ev.paths.iter().any(|p| p.extension().is_some_and(|e| e == "lua")) {
-                let _ = tx.send(ToLua::Reload);
-            }
-        });
-        if let Ok(mut w) = watcher {
-            if w.watch(&self.config_dir, notify::RecursiveMode::Recursive).is_ok() {
-                self.watcher = Some(w);
+        self.watchers.clear();
+        for dir in folders.iter().filter(|d| d.is_dir()) {
+            let tx = self.tx.clone();
+            let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                let Ok(ev) = res else { return };
+                if matches!(ev.kind, notify::EventKind::Access(_)) {
+                    return;
+                }
+                if ev.paths.iter().any(|p| p.extension().is_some_and(|e| e == "lua" || e == "json" || e == "scm")) {
+                    let _ = tx.send(ToLua::Reload);
+                }
+            });
+            if let Ok(mut w) = watcher {
+                if w.watch(dir, notify::RecursiveMode::Recursive).is_ok() {
+                    self.watchers.push(w);
+                }
             }
         }
     }
@@ -190,7 +310,7 @@ impl Drop for LuaHost {
     }
 }
 
-fn vm_thread(dir: PathBuf, rx: flume::Receiver<ToLua>, out: flume::Sender<FromLua>) {
+fn vm_thread(dirs: LuaDirs, rx: flume::Receiver<ToLua>, out: flume::Sender<FromLua>) {
     let mut vm: Option<Vm> = None;
     while let Ok(msg) = rx.recv() {
         match msg {
@@ -206,7 +326,7 @@ fn vm_thread(dir: PathBuf, rx: flume::Receiver<ToLua>, out: flume::Sender<FromLu
                     }
                 }
                 drop(vm.take());
-                let fresh = Vm::load(&dir, &out);
+                let fresh = Vm::load(&dirs, &out);
                 for m in pending {
                     fresh.handle(m, &out);
                 }
@@ -230,6 +350,19 @@ struct Registry {
     allow: HashMap<String, HashSet<String>>,
     ctx: EditorContext,
     refresh: Vec<u64>,
+    /// Extension being loaded (id, folder, may load native code) — registrations are
+    /// credited to it and its relative paths resolve against its folder.
+    current: Option<(String, PathBuf, bool)>,
+    provides: HashMap<String, Vec<String>>,
+    config_dir: PathBuf,
+}
+
+impl Registry {
+    fn credit(&mut self, what: String) {
+        if let Some((id, _, _)) = &self.current {
+            self.provides.entry(id.clone()).or_default().push(what);
+        }
+    }
 }
 
 struct Vm {
@@ -296,12 +429,14 @@ fn to_value_string(v: &Value) -> String {
 }
 
 impl Vm {
-    fn load(dir: &Path, out: &flume::Sender<FromLua>) -> Vm {
+    fn load(dirs: &LuaDirs, out: &flume::Sender<FromLua>) -> Vm {
+        let dir = &dirs.config;
+        let state = PluginState::load(dir);
         let _ = out.send(FromLua::Reset);
         // SAFETY: the full library set (with `ffi`) is for the user's own init.lua; plugins
         // only see the sandbox environment built by SANDBOX.
         let lua = unsafe { Lua::unsafe_new_with(StdLib::ALL, LuaOptions::default()) };
-        let reg = Rc::new(RefCell::new(Registry::default()));
+        let reg = Rc::new(RefCell::new(Registry { config_dir: dir.clone(), ..Default::default() }));
         let deadline: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
         let d = deadline.clone();
         let _ = lua.set_hook(HookTriggers::new().every_nth_instruction(10_000), move |_, _| {
@@ -328,18 +463,42 @@ impl Vm {
                 Err(e) => errors.push(format!("init.lua: {e}")),
             }
         }
-        for (name, file, folder) in discover_plugins(&dir.join("plugins")) {
-            let allowed: Vec<String> = vm.reg.borrow().allow.get(&name).map(|s| s.iter().cloned().collect()).unwrap_or_default();
-            let env = vm
-                .lua
-                .named_registry_value::<Function>("graphyne.sandbox")
-                .and_then(|make| make.call::<Table>((name.clone(), folder.to_string_lossy().replace('\\', "/"), allowed)));
-            let result = env.and_then(|env| vm.run_file(&file, Some(env)).map_err(mlua::Error::runtime));
-            match result {
-                Ok(()) => files.push(format!("plugins/{name}")),
-                Err(e) => errors.push(format!("plugin {name}: {e}")),
+        let mut report = Vec::new();
+        for (manifest, file) in discover_plugins(&dirs.plugins) {
+            let id = manifest.id.clone();
+            let mut info = manifest;
+            info.enabled = !state.disabled.contains(&id);
+            let mut granted: HashSet<String> = state.permissions.get(&id).cloned().unwrap_or_default().into_iter().collect();
+            granted.extend(vm.reg.borrow().allow.get(&id).cloned().unwrap_or_default());
+            info.granted = {
+                let mut g: Vec<String> = granted.iter().cloned().collect();
+                g.sort();
+                g
+            };
+            if info.enabled {
+                vm.reg.borrow_mut().current = Some((id.clone(), info.folder.clone(), granted.contains("native")));
+                let allowed: Vec<String> = granted.iter().cloned().collect();
+                let env = vm
+                    .lua
+                    .named_registry_value::<Function>("graphyne.sandbox")
+                    .and_then(|make| make.call::<Table>((id.clone(), info.folder.to_string_lossy().replace('\\', "/"), allowed)));
+                let result = env.and_then(|env| vm.run_file(&file, Some(env)).map_err(mlua::Error::runtime));
+                vm.reg.borrow_mut().current = None;
+                match result {
+                    Ok(()) => {
+                        info.loaded = true;
+                        files.push(format!("{}", info.name));
+                    }
+                    Err(e) => {
+                        errors.push(format!("{}: {e}", info.name));
+                        info.error = Some(e.to_string());
+                    }
+                }
             }
+            info.provides = vm.reg.borrow().provides.get(&id).cloned().unwrap_or_default();
+            report.push(info);
         }
+        let _ = out.send(FromLua::Plugins(report));
         for e in &errors {
             let _ = out.send(FromLua::Notify { message: format!("Lua: {e}"), error: true });
         }
@@ -436,6 +595,8 @@ impl Vm {
         let lua = &self.lua;
         let g = lua.create_table()?;
         g.set("version", env!("CARGO_PKG_VERSION"))?;
+        // "windows" / "linux" / "macos": lets an extension pick its grammar library name.
+        g.set("os", std::env::consts::OS)?;
 
         let notify = {
             let out = out.clone();
@@ -469,6 +630,7 @@ impl Vm {
                         (h.finish() & ((1 << 52) - 1)) | (1 << 52)
                     };
                     reg.borrow_mut().tabs.insert(id, items);
+                    reg.borrow_mut().credit(format!("Tab: {title}"));
                     let _ = out.send(FromLua::RegisterTab { id, title, side });
                     Ok(id)
                 })?,
@@ -499,6 +661,7 @@ impl Vm {
                     };
                     let id = next_id();
                     reg.borrow_mut().keys.insert(id, f);
+                    reg.borrow_mut().credit(format!("Key: {keys}"));
                     let _ = out.send(FromLua::Keymap { id, keys, context });
                     Ok(id)
                 })?,
@@ -617,6 +780,85 @@ impl Vm {
         }
         g.set("settings", settings)?;
 
+        // themes.register
+        let themes = lua.create_table()?;
+        {
+            let (out, reg) = (out.clone(), self.reg.clone());
+            themes.set(
+                "register",
+                lua.create_function(move |_, spec: Table| {
+                    let name: String = spec.get("name")?;
+                    let ui = color_table(spec.get("ui")?, "ui")?;
+                    let syntax = color_table(spec.get("syntax")?, "syntax")?;
+                    let mut reg = reg.borrow_mut();
+                    reg.credit(format!("Theme: {name}"));
+                    let plugin = reg.current.as_ref().map(|c| c.0.clone());
+                    let _ = out.send(FromLua::Theme(ThemeSpec { name, ui, syntax, plugin }));
+                    Ok(())
+                })?,
+            )?;
+        }
+        g.set("themes", themes)?;
+
+        // languages.register
+        let languages = lua.create_table()?;
+        {
+            let (out, reg) = (out.clone(), self.reg.clone());
+            languages.set(
+                "register",
+                lua.create_function(move |_, spec: Table| {
+                    let name: String = spec.get("name")?;
+                    let list = |k: &str| -> mlua::Result<Vec<String>> { Ok(spec.get::<Option<Vec<String>>>(k)?.unwrap_or_default()) };
+                    let extensions: Vec<String> = list("extensions")?.into_iter().map(|e| e.trim_start_matches('.').to_ascii_lowercase()).collect();
+                    let file_names = list("file_names")?;
+                    if extensions.is_empty() && file_names.is_empty() {
+                        return Err(mlua::Error::runtime(format!("language {name}: give extensions or file_names")));
+                    }
+                    let lsp = match spec.get::<Option<Table>>("lsp")? {
+                        Some(t) => Some((t.get::<String>("command")?, t.get::<Option<Vec<String>>>("args")?.unwrap_or_default())),
+                        None => None,
+                    };
+                    let mut reg = reg.borrow_mut();
+                    let (base, native) = match &reg.current {
+                        Some((_, folder, native)) => (folder.clone(), *native),
+                        None => (reg.config_dir.clone(), true), // init.lua is the user's own file
+                    };
+                    let (mut grammar, mut grammar_error) = (None, None);
+                    if let Some(g) = spec.get::<Option<Table>>("grammar")? {
+                        let library = base.join(g.get::<String>("library")?);
+                        let symbol: String = g.get("symbol")?;
+                        let highlights_path = base.join(g.get::<Option<String>>("highlights")?.unwrap_or_else(|| "highlights.scm".into()));
+                        if !native {
+                            grammar_error = Some("no highlighting yet: the grammar is native code — allow the \"native\" permission".into());
+                        } else if !library.is_file() {
+                            grammar_error = Some(format!("grammar library not found: {}", library.display()));
+                        } else {
+                            match std::fs::read_to_string(&highlights_path) {
+                                Ok(highlights) => grammar = Some(GrammarSpec { library, symbol, highlights }),
+                                Err(e) => grammar_error = Some(format!("{}: {e}", highlights_path.display())),
+                            }
+                        }
+                    }
+                    let exts: Vec<String> = extensions.iter().map(|e| format!(".{e}")).collect();
+                    reg.credit(format!("Language: {name} ({})", exts.join(", ")));
+                    let plugin = reg.current.as_ref().map(|c| c.0.clone());
+                    let _ = out.send(FromLua::Language(LanguageSpec {
+                        name,
+                        extensions,
+                        file_names,
+                        line_comment: spec.get("line_comment")?,
+                        lsp,
+                        run: spec.get("run")?,
+                        grammar,
+                        grammar_error,
+                        plugin,
+                    }));
+                    Ok(())
+                })?,
+            )?;
+        }
+        g.set("languages", languages)?;
+
         // plugins.allow (meaningful in init.lua, before plugins load)
         let plugins = lua.create_table()?;
         {
@@ -652,26 +894,62 @@ impl Vm {
     }
 }
 
-/// `plugins/name.lua` and `plugins/name/init.lua`, sorted by name: (name, file, folder).
-fn discover_plugins(dir: &Path) -> Vec<(String, PathBuf, PathBuf)> {
+/// Extension folders (`plugins/<id>/init.lua`, optional `plugin.json`), sorted by id.
+fn discover_plugins(dir: &Path) -> Vec<(PluginInfo, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut out: Vec<(String, PathBuf, PathBuf)> = entries
+    let mut out: Vec<(PluginInfo, PathBuf)> = entries
         .flatten()
         .filter_map(|e| {
-            let path = e.path();
-            if path.is_dir() {
-                let init = path.join("init.lua");
-                init.is_file().then(|| (e.file_name().to_string_lossy().to_string(), init, path))
-            } else if path.extension().is_some_and(|x| x == "lua") {
-                let name = path.file_stem()?.to_string_lossy().to_string();
-                Some((name, path.clone(), dir.to_path_buf()))
-            } else {
-                None
+            let folder = e.path();
+            let init = folder.join("init.lua");
+            if !folder.is_dir() || !init.is_file() {
+                return None;
             }
+            let id = e.file_name().to_string_lossy().to_string();
+            let manifest: serde_json::Value = std::fs::read_to_string(folder.join("plugin.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+            let text = |k: &str| manifest[k].as_str().map(str::to_string);
+            let info = PluginInfo {
+                name: text("name").unwrap_or_else(|| id.clone()),
+                version: text("version"),
+                description: text("description"),
+                author: text("author"),
+                requested: manifest["permissions"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+                id,
+                folder,
+                ..Default::default()
+            };
+            Some((info, init))
         })
         .collect();
-    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.sort_by(|a, b| a.0.id.cmp(&b.0.id));
     out
+}
+
+/// "#RRGGBB" / "#RGB" → 0xRRGGBB.
+fn parse_color(s: &str) -> Option<u32> {
+    let hex = s.trim().strip_prefix('#')?;
+    match hex.len() {
+        6 => u32::from_str_radix(hex, 16).ok(),
+        3 => {
+            let v = u32::from_str_radix(hex, 16).ok()?;
+            let (r, g, b) = ((v >> 8) & 0xF, (v >> 4) & 0xF, v & 0xF);
+            Some((r * 17) << 16 | (g * 17) << 8 | b * 17)
+        }
+        _ => None,
+    }
+}
+
+fn color_table(t: Option<Table>, what: &str) -> mlua::Result<Vec<(String, u32)>> {
+    let mut out = Vec::new();
+    if let Some(t) = t {
+        for pair in t.pairs::<String, String>() {
+            let (k, v) = pair?;
+            let c = parse_color(&v).ok_or_else(|| mlua::Error::runtime(format!("{what}.{k}: '{v}' is not a #RRGGBB colour")))?;
+            out.push((k, c));
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -683,7 +961,8 @@ mod tests {
         std::fs::create_dir_all(dir.join("plugins")).unwrap();
         std::fs::write(dir.join("init.lua"), init).unwrap();
         for (name, src) in plugins {
-            std::fs::write(dir.join("plugins").join(format!("{name}.lua")), src).unwrap();
+            std::fs::create_dir_all(dir.join("plugins").join(name)).unwrap();
+            std::fs::write(dir.join("plugins").join(name).join("init.lua"), src).unwrap();
         }
         dir
     }
@@ -691,9 +970,51 @@ mod tests {
     /// Drive the VM synchronously on this thread.
     fn load(dir: &Path) -> (Vm, Vec<FromLua>, flume::Receiver<FromLua>, flume::Sender<FromLua>) {
         let (tx, rx) = flume::unbounded();
-        let vm = Vm::load(dir, &tx);
+        let vm = Vm::load(&LuaDirs { config: dir.to_path_buf(), plugins: dir.join("plugins") }, &tx);
         let events: Vec<FromLua> = rx.try_iter().collect();
         (vm, events, rx, tx)
+    }
+
+    #[test]
+    fn extensions_report_state_themes_and_languages() {
+        let theme = r##"
+            graphyne.themes.register({ name = "Nord", ui = { canvas = "#2E3440", accent = "#88C0D0" }, syntax = { keyword = "#81A1C1" } })
+        "##;
+        let lang = r##"
+            graphyne.languages.register({ name = "Zig", extensions = { ".zig" }, line_comment = "//",
+              lsp = { command = "zls" }, run = "zig run {file}",
+              grammar = { library = "zig.dll", symbol = "tree_sitter_zig" } })
+        "##;
+        let dir = temp_config("", &[("nord", theme), ("zig", lang), ("off", "error('must not run')")]);
+        std::fs::write(dir.join("plugins/nord/plugin.json"), r#"{ "name": "Nord Theme", "version": "1.0.0", "description": "Arctic colours" }"#).unwrap();
+        std::fs::write(dir.join("plugins/zig/plugin.json"), r#"{ "name": "Zig", "permissions": ["native"] }"#).unwrap();
+        let mut state = PluginState::default();
+        state.disabled.insert("off".into());
+        state.save(&dir).unwrap();
+        assert_eq!(PluginState::load(&dir), state);
+
+        let (_vm, events, _rx, _tx) = load(&dir);
+        let report = events.iter().find_map(|e| if let FromLua::Plugins(p) = e { Some(p.clone()) } else { None }).unwrap();
+        let by_id = |id: &str| report.iter().find(|p| p.id == id).unwrap().clone();
+        let nord = by_id("nord");
+        assert_eq!((nord.name.as_str(), nord.version.as_deref(), nord.loaded), ("Nord Theme", Some("1.0.0"), true));
+        assert_eq!(nord.provides, ["Theme: Nord"]);
+        let off = by_id("off");
+        assert!(!off.enabled && !off.loaded && off.error.is_none(), "disabled extensions do not run");
+        let zig = by_id("zig");
+        assert_eq!(zig.requested, ["native"]);
+        assert!(zig.granted.is_empty());
+        assert!(events.contains(&FromLua::Theme(ThemeSpec {
+            name: "Nord".into(),
+            ui: vec![("accent".into(), 0x88C0D0), ("canvas".into(), 0x2E3440)],
+            syntax: vec![("keyword".into(), 0x81A1C1)],
+            plugin: Some("nord".into()),
+        })));
+        let language = events.iter().find_map(|e| if let FromLua::Language(l) = e { Some(l.clone()) } else { None }).unwrap();
+        assert_eq!(language.extensions, ["zig"]);
+        assert_eq!(language.lsp, Some(("zls".into(), vec![])));
+        assert!(language.grammar.is_none() && language.grammar_error.as_deref().is_some_and(|e| e.contains("native")), "no native code without permission");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -760,7 +1081,7 @@ mod tests {
         );
         let (vm, events, rx, tx) = load(&dir);
         let tab = events.iter().find_map(|e| if let FromLua::RegisterTab { id, side: Side::Right, .. } = e { Some(*id) } else { None }).unwrap();
-        assert!(matches!(events.last(), Some(FromLua::Loaded { errors, .. }) if errors.len() == 1 && errors[0].starts_with("plugin broken")));
+        assert!(matches!(events.last(), Some(FromLua::Loaded { errors, .. }) if errors.len() == 1 && errors[0].starts_with("broken:")));
         vm.handle(ToLua::TabRefresh { tab }, &tx);
         vm.handle(ToLua::TabClick { tab, item: 1, ctx: EditorContext::default() }, &tx);
         let items: Vec<FromLua> = rx.try_iter().collect();

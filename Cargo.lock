@@ -2583,6 +2583,7 @@ dependencies = [
  "log",
  "mlua",
  "notify",
+ "serde_json",
 ]
 
 [[package]]
@@ -2590,6 +2591,7 @@ name = "graphyne-syntax"
 version = "0.1.0-alpha.2"
 dependencies = [
  "graphyne-core",
+ "libloading",
  "log",
  "ropey",
  "tree-sitter",
@@ -2605,6 +2607,7 @@ dependencies = [
  "tree-sitter-javascript",
  "tree-sitter-json",
  "tree-sitter-kotlin-ng",
+ "tree-sitter-language",
  "tree-sitter-lua",
  "tree-sitter-php",
  "tree-sitter-python",

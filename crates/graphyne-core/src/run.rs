@@ -105,6 +105,14 @@ pub fn plan(file: &Path, project_root: &Path, shell: ShellKind) -> RunPlan {
         LanguageId::PowerShell => pty(&name, dir, format!("& {f}")),
         LanguageId::Html | LanguageId::Css => RunPlan::WebPreview { root: dir, entry: file.to_path_buf() },
         LanguageId::Sql => RunPlan::Sql { file: file.to_path_buf() },
+        LanguageId::Plugin(ix) => match crate::language::plugin_language(ix).and_then(|l| l.run) {
+            Some(template) => {
+                let d = quote(shell, &dir);
+                let stem = file.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                pty(&name, dir, template.replace("{file}", &f).replace("{dir}", &d).replace("{name}", &stem))
+            }
+            None => RunPlan::Unsupported { reason: format!("The {} extension has no run command", lang.name()) },
+        },
         _ => RunPlan::Unsupported { reason: format!("No run configuration for {}", lang.name()) },
     }
 }

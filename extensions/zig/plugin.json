@@ -1,0 +1,7 @@
+{
+  "name": "Zig",
+  "version": "0.1.0",
+  "description": "Zig language support: syntax highlighting (tree-sitter-zig grammar), the zls language server and Run (zig run).",
+  "author": "Graphyne examples",
+  "permissions": ["native"]
+}

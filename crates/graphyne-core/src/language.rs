@@ -1,6 +1,7 @@
 //! The language / toolchain matrix (spec §6.3).
 
 use std::path::Path;
+use std::sync::RwLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LanguageId {
@@ -31,6 +32,75 @@ pub enum LanguageId {
     Shell,
     PowerShell,
     PlainText,
+    /// Added by an extension (`graphyne.languages.register`): index into the registry.
+    Plugin(u16),
+}
+
+/// A language registered by an extension.
+#[derive(Clone)]
+pub struct PluginLanguage {
+    pub name: &'static str,
+    pub extensions: Vec<String>,
+    pub file_names: Vec<String>,
+    pub info: &'static LanguageInfo,
+    /// Run command template (`{file}`, `{dir}`, `{name}`).
+    pub run: Option<String>,
+}
+
+static PLUGIN_LANGUAGES: RwLock<Vec<PluginLanguage>> = RwLock::new(Vec::new());
+
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+/// Register (or update, by name) an extension language; returns its id. Re-registering
+/// keeps the id, so open files and caches stay valid across plugin reloads.
+pub fn register_plugin_language(name: &str, extensions: &[String], file_names: &[String], line_comment: Option<&str>, run: Option<&str>) -> LanguageId {
+    let mut langs = PLUGIN_LANGUAGES.write().unwrap_or_else(|e| e.into_inner());
+    let ix = langs.iter().position(|l| l.name == name);
+    let info: &'static LanguageInfo = match ix.map(|i| langs[i].info) {
+        // Unchanged comment token: keep the leaked info (no leak per reload).
+        Some(old) if old.line_comment == line_comment => old,
+        _ => Box::leak(Box::new(LanguageInfo {
+            name: leak(name.to_string()),
+            badge: "EXT",
+            badge_color: 0x8A8F98,
+            line_comment: line_comment.map(|c| leak(c.to_string())),
+            lsp: None,
+            dap: None,
+            toolchain: None,
+        })),
+    };
+    let entry = PluginLanguage {
+        name: info.name,
+        extensions: extensions.iter().map(|e| e.trim_start_matches('.').to_ascii_lowercase()).collect(),
+        file_names: file_names.to_vec(),
+        info,
+        run: run.map(str::to_string),
+    };
+    match ix {
+        Some(i) => {
+            langs[i] = entry;
+            LanguageId::Plugin(i as u16)
+        }
+        None => {
+            langs.push(entry);
+            LanguageId::Plugin((langs.len() - 1) as u16)
+        }
+    }
+}
+
+pub fn plugin_language(ix: u16) -> Option<PluginLanguage> {
+    PLUGIN_LANGUAGES.read().unwrap_or_else(|e| e.into_inner()).get(ix as usize).cloned()
+}
+
+/// Extension languages win only for files no built-in language claims.
+fn plugin_language_for(file_name: &str, ext: &str) -> Option<LanguageId> {
+    let langs = PLUGIN_LANGUAGES.read().unwrap_or_else(|e| e.into_inner());
+    langs
+        .iter()
+        .position(|l| l.file_names.iter().any(|f| f == file_name) || (!ext.is_empty() && l.extensions.iter().any(|e| e == ext)))
+        .map(|i| LanguageId::Plugin(i as u16))
 }
 
 /// Static description of a language row of the matrix.
@@ -82,7 +152,7 @@ impl LanguageId {
             "md" | "markdown" => LanguageId::Markdown,
             "sh" | "bash" | "zsh" => LanguageId::Shell,
             "ps1" | "psm1" => LanguageId::PowerShell,
-            _ => LanguageId::PlainText,
+            _ => plugin_language_for(file_name, &ext).unwrap_or(LanguageId::PlainText),
         }
     }
 
@@ -130,6 +200,7 @@ impl LanguageId {
             Shell => info!("Shell", "SH", 0x89B482, Some("#"), Some("bash-language-server"), None, None),
             PowerShell => info!("PowerShell", "PS", 0x5391FE, Some("#"), None, None, None),
             PlainText => info!("Plain Text", "TXT", 0x8A8F98, None, None, None, None),
+            Plugin(ix) => plugin_language(ix).map(|l| l.info).unwrap_or_else(|| PlainText.info()),
         }
     }
 

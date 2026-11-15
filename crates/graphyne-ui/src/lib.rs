@@ -15,6 +15,7 @@ mod hex_view;
 mod lsp_store;
 mod lua_bridge;
 mod panels;
+mod plugins_page;
 mod search_everywhere;
 mod terminal_view;
 mod text_input;

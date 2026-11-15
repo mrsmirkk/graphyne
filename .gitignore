@@ -1,2 +1,7 @@
 /target
 /dist
+# Grammar libraries are built (packaging script / cargo build in grammar/)
+/extensions/*/grammar/target
+/extensions/*/*.dll
+/extensions/*/*.so
+/extensions/*/*.dylib

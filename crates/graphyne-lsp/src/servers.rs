@@ -75,7 +75,26 @@ pub fn specs_for(lang: LanguageId) -> &'static [ServerSpec] {
         Toml => TOML,
         Shell => SHELL,
         Yaml | Markdown | PowerShell | PlainText => &[],
+        Plugin(ix) => PLUGIN_SERVERS.read().unwrap_or_else(|e| e.into_inner()).get(&ix).map(|(s, _)| *s).unwrap_or(&[]),
     }
+}
+
+/// Language servers declared by extensions, with the LSP languageId (lower-case name).
+static PLUGIN_SERVERS: std::sync::RwLock<std::collections::BTreeMap<u16, (&'static [ServerSpec], &'static str)>> = std::sync::RwLock::new(std::collections::BTreeMap::new());
+
+/// `graphyne.languages.register{ lsp = { command, args } }`.
+pub fn register_plugin_server(lang: LanguageId, command: &str, args: &[String]) {
+    let LanguageId::Plugin(ix) = lang else { return };
+    let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+    let args: Vec<&'static str> = args.iter().map(|a| leak(a.clone())).collect();
+    let spec = ServerSpec {
+        name: leak(format!("{}-{command}", lang.name())),
+        program: leak(command.to_string()),
+        args: Box::leak(args.into_boxed_slice()),
+        install_hint: "see the extension's description",
+    };
+    let id = leak(lang.name().to_ascii_lowercase());
+    PLUGIN_SERVERS.write().unwrap_or_else(|e| e.into_inner()).insert(ix, (Box::leak(vec![spec].into_boxed_slice()), id));
 }
 
 /// LSP `languageId` for `textDocument/didOpen`.
@@ -109,6 +128,7 @@ pub fn language_id(lang: LanguageId) -> &'static str {
         Shell => "shellscript",
         PowerShell => "powershell",
         PlainText => "plaintext",
+        Plugin(ix) => PLUGIN_SERVERS.read().unwrap_or_else(|e| e.into_inner()).get(&ix).map(|(_, id)| *id).unwrap_or("plaintext"),
     }
 }
 

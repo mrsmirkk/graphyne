@@ -175,8 +175,30 @@ pub fn config_for(id: LanguageId) -> Option<&'static LanguageConfig> {
         LanguageId::Sql => cached!(id, tree_sitter_sequel::LANGUAGE, tree_sitter_sequel::HIGHLIGHTS_QUERY),
         LanguageId::Yaml => cached!(id, tree_sitter_yaml::LANGUAGE, tree_sitter_yaml::HIGHLIGHTS_QUERY),
         LanguageId::Shell => cached!(id, tree_sitter_bash::LANGUAGE, tree_sitter_bash::HIGHLIGHT_QUERY),
+        LanguageId::Plugin(ix) => PLUGIN_GRAMMARS.read().unwrap_or_else(|e| e.into_inner()).get(&ix).copied(),
         _ => None,
     }
+}
+
+static PLUGIN_GRAMMARS: std::sync::RwLock<std::collections::BTreeMap<u16, &'static LanguageConfig>> = std::sync::RwLock::new(std::collections::BTreeMap::new());
+
+/// Load an extension's tree-sitter grammar from a native library (`symbol` returns the
+/// `TSLanguage*`) with its highlights query. The library stays loaded for the process
+/// lifetime (the language points into it). Returns a warning when the query is invalid.
+pub fn load_plugin_grammar(id: LanguageId, library: &std::path::Path, symbol: &str, highlights: &str) -> Result<Option<String>, String> {
+    let LanguageId::Plugin(ix) = id else { return Err("not an extension language".into()) };
+    // SAFETY: loading a library runs its initialisers; the IDE only calls this for
+    // extensions the user granted the "native" permission.
+    let lib = unsafe { libloading::Library::new(library) }.map_err(|e| format!("{}: {e}", library.display()))?;
+    let func: unsafe extern "C" fn() -> *const () = unsafe { *lib.get(symbol.as_bytes()).map_err(|e| format!("{symbol}: {e}"))? };
+    // SAFETY: tree-sitter grammars export `const TSLanguage *tree_sitter_<name>(void)`.
+    let language: Language = unsafe { tree_sitter_language::LanguageFn::from_raw(func) }.into();
+    Parser::new().set_language(&language).map_err(|e| format!("incompatible grammar: {e}"))?;
+    std::mem::forget(lib);
+    let config: &'static LanguageConfig = Box::leak(Box::new(build(id, language, highlights)));
+    let warning = config.highlights.is_none().then(|| "highlights query failed to compile: no colours".to_string());
+    PLUGIN_GRAMMARS.write().unwrap_or_else(|e| e.into_inner()).insert(ix, config);
+    Ok(warning)
 }
 
 pub fn supports(id: LanguageId) -> bool {

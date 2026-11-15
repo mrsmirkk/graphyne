@@ -1,4 +1,4 @@
-﻿//! The root window view: Fleet island layout.
+//! The root window view: Fleet island layout.
 //!
 //! ```text
 //! title bar (CSD)
@@ -678,6 +678,7 @@ impl Workspace {
                 self.left_tab = LeftTab::History;
             }
             IdeAction::OpenFolder => crate::prompt_open_folder(cx),
+            IdeAction::Plugins => self.pane.update(cx, |p, cx| p.open_plugins_page(window, cx)),
             IdeAction::Quit => self.quit(&Quit, window, cx),
         }
         cx.notify();
@@ -776,7 +777,7 @@ impl Workspace {
                 })
                 .detach();
             }
-            RunPlan::Sql { .. } => self.notify_user("SQL execution â†’ DataGrid requires a database connection (planned: sqlx pools)", true, cx),
+            RunPlan::Sql { .. } => self.notify_user("SQL execution → DataGrid requires a database connection (planned: sqlx pools)", true, cx),
             RunPlan::Unsupported { reason } => self.notify_user(reason, true, cx),
         }
         cx.notify();
@@ -801,7 +802,7 @@ impl Workspace {
             cx.notify();
         });
         let weak = cx.entity().downgrade();
-        let title: SharedString = format!("Terminal â€” {}", self.project_name).into();
+        let title: SharedString = format!("Terminal — {}", self.project_name).into();
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions { title: Some(title.clone()), appears_transparent: true, traffic_light_position: Some(point(px(12.), px(12.))) }),
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(980.), px(600.)), cx))),
@@ -1200,7 +1201,7 @@ impl Workspace {
                                 .hover(|s| s.bg(color_a(c::YELLOW, 0.12)))
                                 .on_click(move |_, window, cx| editor.update(cx, |e, cx| e.go_to(row, col, window, cx)))
                                 .child(div().flex().items_center().gap(px(6.)).text_color(color(c::YELLOW)).child(icon(Icon::Warning, 13., color(c::YELLOW))).child(f.kind))
-                                .child(div().text_size(px(12.)).text_color(color(c::TEXT_MUTED)).child(format!("line {} Â· {}", row + 1, f.preview)))
+                                .child(div().text_size(px(12.)).text_color(color(c::TEXT_MUTED)).child(format!("line {} · {}", row + 1, f.preview)))
                         }))
                         .into_any_element()
                 }
@@ -1273,6 +1274,9 @@ impl Workspace {
                 let toolchain = self.toolchains.get(&lang).cloned().flatten();
                 right.push(div().child(toolchain.unwrap_or_else(|| lang.name().into())).into_any_element());
             }
+            Some(PaneItem::Plugins(_)) => {
+                crumbs.push("Plugins".into());
+            }
             Some(PaneItem::Diff(d)) => {
                 let d = d.read(cx);
                 if let Ok(rel) = d.path.strip_prefix(&self.root) {
@@ -1340,6 +1344,13 @@ impl Workspace {
         crate::lua_bridge::set_active(cx.entity().downgrade(), window.window_handle(), cx);
         let ctx = self.lua_context(cx);
         crate::lua_bridge::send(graphyne_lua::ToLua::Key { id: action.id, ctx }, cx);
+    }
+
+    pub fn redetect_languages(&mut self, cx: &mut Context<Self>) {
+        let editors: Vec<_> = self.pane.read(cx).editors().cloned().collect();
+        for e in editors {
+            e.update(cx, |e, cx| e.redetect_language(cx));
+        }
     }
 
     /// `graphyne.terminal.run`: the command runs in the named tab (or "Lua").
@@ -1466,7 +1477,7 @@ impl Workspace {
                 .when_some(shortcut, |d, s| d.child(div().text_size(px(11.5)).text_color(color(c::TEXT_DIM)).child(s)))
         };
         let section = |label: &'static str| div().px(px(10.)).pt(px(8.)).pb(px(2.)).text_size(px(11.)).text_color(color(c::TEXT_FAINT)).child(label);
-        let open_folder = item("menu-open", "Open Folderâ€¦".into(), None, None).on_click(cx.listener(|this, _, _, cx| {
+        let open_folder = item("menu-open", "Open Folder…".into(), None, None).on_click(cx.listener(|this, _, _, cx| {
             this.menu = None;
             crate::prompt_open_folder(cx);
             cx.notify();
@@ -1518,12 +1529,12 @@ impl Workspace {
                         this.run_active(window, cx);
                     })))
                     .child(section("AUDIT & REVERSE ENGINEERING"))
-                    .when(presets.is_empty(), |d| d.child(div().px(px(10.)).py(px(6.)).text_color(color(c::TEXT_DIM)).child("Checking installed toolsâ€¦")))
+                    .when(presets.is_empty(), |d| d.child(div().px(px(10.)).py(px(6.)).text_color(color(c::TEXT_DIM)).child("Checking installed tools…")))
                     .children(presets.into_iter().enumerate().map(|(ix, (preset, installed))| {
                         let detail: SharedString = if installed {
                             if preset.needs_target { format!("{}<target>", preset.command).into() } else { preset.command.into() }
                         } else {
-                            format!("not installed â€” {}", preset.install_hint).into()
+                            format!("not installed — {}", preset.install_hint).into()
                         };
                         let row = item("menu-preset", preset.label.into(), Some(detail), None).id(("menu-preset", ix));
                         if installed {
@@ -1541,7 +1552,12 @@ impl Workspace {
                 panel
                     .top(px(theme::TITLE_BAR_HEIGHT + theme::ISLAND_HEADER_HEIGHT))
                     .left(px(theme::GAP + 8.))
-                    .child(item("menu-init", "Open init.lua".into(), Some("~/.config/graphyne/init.lua â€” reloads on save".into()), None).on_click(cx.listener(|this, _, window, cx| {
+                    .child(item("menu-plugins-page", "Plugins…".into(), Some("installed extensions, permissions, theme".into()), None).on_click(cx.listener(|this, _, window, cx| {
+                        this.menu = None;
+                        this.pane.update(cx, |p, cx| p.open_plugins_page(window, cx));
+                        cx.notify();
+                    })))
+                    .child(item("menu-init", "Open init.lua".into(), Some("~/.config/graphyne/init.lua — reloads on save".into()), None).on_click(cx.listener(|this, _, window, cx| {
                         this.menu = None;
                         match crate::lua_bridge::ensure_init_file(cx) {
                             Some(file) => this.open_file(file, None, window, cx),
@@ -1555,13 +1571,13 @@ impl Workspace {
                         cx.reveal_path(&dir);
                         cx.notify();
                     })))
-                    .child(item("menu-lua-reload", "Reload Lua".into(), None, None).on_click(cx.listener(|this, _, _, cx| {
+                    .child(item("menu-lua-reload", "Reload plugins".into(), None, None).on_click(cx.listener(|this, _, _, cx| {
                         this.menu = None;
                         crate::lua_bridge::send(graphyne_lua::ToLua::Reload, cx);
                         cx.notify();
                     })))
                     .child(section("PLUGIN TABS"))
-                    .when(tabs.is_empty(), |d| d.child(div().px(px(10.)).py(px(6.)).text_color(color(c::TEXT_DIM)).child("None yet â€” graphyne.ui.register_tab in init.lua")))
+                    .when(tabs.is_empty(), |d| d.child(div().px(px(10.)).py(px(6.)).text_color(color(c::TEXT_DIM)).child("None yet — graphyne.ui.register_tab in init.lua")))
                     .children(tabs.into_iter().enumerate().map(|(ix, t)| {
                         let side = if t.side == graphyne_lua::Side::Left { "left panel" } else { "right panel" };
                         let id = t.id;
@@ -1583,14 +1599,19 @@ impl Workspace {
             Menu::App => panel
                 .right(px(130.))
                 .child(open_folder)
-                .child(item("menu-actions", "All Actionsâ€¦".into(), None, Some("Ctrl+Shift+O")).on_click(cx.listener(|this, _, window, cx| {
+                .child(item("menu-plugins", "Plugins".into(), None, None).on_click(cx.listener(|this, _, window, cx| {
+                    this.menu = None;
+                    this.pane.update(cx, |p, cx| p.open_plugins_page(window, cx));
+                    cx.notify();
+                })))
+                .child(item("menu-actions", "All Actions…".into(), None, Some("Ctrl+Shift+O")).on_click(cx.listener(|this, _, window, cx| {
                     this.menu = None;
                     this.toggle_search(window, cx);
                     cx.notify();
                 })))
                 .child(item("menu-about", "About Graphyne".into(), None, None).on_click(cx.listener(|this, _, _, cx| {
                     this.menu = None;
-                    let msg = format!("Graphyne {} â€” Rust + GPUI. Settings and plugins (init.lua) are not available yet.", env!("CARGO_PKG_VERSION"));
+                    let msg = format!("Graphyne {} — Rust + GPUI. Extensions: Plugins page (main menu).", env!("CARGO_PKG_VERSION"));
                     this.notify_user(msg, false, cx);
                     this.show_notifications = true;
                     this.unread = false;

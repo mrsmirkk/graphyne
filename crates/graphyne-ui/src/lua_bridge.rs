@@ -4,7 +4,9 @@
 
 use crate::workspace::Workspace;
 use gpui::{AnyWindowHandle, App, Global, KeyBinding, Keystroke, SharedString, WeakEntity};
-use graphyne_lua::{FromLua, KeyContext, LuaHost, Side, TabItem, ToLua};
+use graphyne_lua::{FromLua, KeyContext, LuaDirs, LuaHost, PluginInfo, PluginState, Side, TabItem, ToLua};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Key binding registered by `graphyne.keymap.set`.
 #[derive(Clone, PartialEq, gpui::Action)]
@@ -28,15 +30,109 @@ pub struct LuaState {
     workspaces: Vec<(WeakEntity<Workspace>, AnyWindowHandle)>,
     active: Option<(WeakEntity<Workspace>, AnyWindowHandle)>,
     loads: usize,
+    /// Extensions found by the last load (Plugins page).
+    plugins: Vec<PluginInfo>,
+    /// plugins.json: disabled, permissions, theme.
+    state: PluginState,
+    /// Per-extension warnings (grammar problems…) shown on the Plugins page.
+    notes: HashMap<String, Vec<String>>,
+    /// Grammar library already loaded per language (Windows keeps DLLs locked).
+    grammars: HashMap<u16, PathBuf>,
+}
+
+/// What the Plugins page shows.
+pub struct Snapshot {
+    pub plugins: Vec<PluginInfo>,
+    pub notes: HashMap<String, Vec<String>>,
+    pub plugins_dir: PathBuf,
+    pub init_file: PathBuf,
+}
+
+pub fn snapshot(cx: &App) -> Snapshot {
+    let st = cx.global::<LuaState>();
+    Snapshot { plugins: st.plugins.clone(), notes: st.notes.clone(), plugins_dir: st.host.plugins_dir(), init_file: st.host.init_file() }
+}
+
+fn save_state(cx: &mut App) {
+    let st = cx.global::<LuaState>();
+    if let Err(e) = st.state.save(&st.host.dirs().config) {
+        notify(format!("Could not save plugins.json: {e}"), true, cx);
+    }
+}
+
+pub fn set_enabled(id: &str, enabled: bool, cx: &mut App) {
+    let st = cx.global_mut::<LuaState>();
+    if enabled {
+        st.state.disabled.remove(id);
+    } else {
+        st.state.disabled.insert(id.to_string());
+    }
+    save_state(cx);
+    send(ToLua::Reload, cx);
+}
+
+pub fn set_permission(id: &str, perm: &str, granted: bool, cx: &mut App) {
+    let st = cx.global_mut::<LuaState>();
+    let perms = st.state.permissions.entry(id.to_string()).or_default();
+    if granted {
+        perms.insert(perm.to_string());
+    } else {
+        perms.remove(perm);
+    }
+    if perms.is_empty() {
+        st.state.permissions.remove(id);
+    }
+    save_state(cx);
+    send(ToLua::Reload, cx);
+}
+
+/// Pick the colour theme (`None` = built-in) and remember it.
+pub fn choose_theme(name: Option<String>, cx: &mut App) {
+    crate::theme::activate_theme(name.as_deref());
+    cx.global_mut::<LuaState>().state.theme = name;
+    save_state(cx);
+    cx.refresh_windows();
+}
+
+pub fn request_open_init(cx: &mut App) {
+    with_active(cx, |ws, window, cx| match ensure_init_file(cx) {
+        Some(file) => ws.open_file(file, None, window, cx),
+        None => ws.notify_user("Could not create init.lua", true, cx),
+    });
+}
+
+/// Re-detect every open editor's language (an extension may have added one).
+fn redetect_languages(cx: &mut App) {
+    let targets = cx.global::<LuaState>().workspaces.clone();
+    for (ws, window) in targets {
+        let _ = window.update(cx, |_, _, cx| {
+            if let Some(ws) = ws.upgrade() {
+                ws.update(cx, |ws, cx| ws.redetect_languages(cx));
+            }
+        });
+    }
 }
 
 impl Global for LuaState {}
 
 /// Start the VM (its own thread; nothing here blocks start-up) and pump its events.
 pub fn init(cx: &mut App) {
-    let host = LuaHost::start(LuaHost::default_config_dir());
+    let dirs = LuaDirs::default_dirs();
+    let state = PluginState::load(&dirs.config);
+    let host = LuaHost::start(dirs);
     let events = host.events();
-    cx.set_global(LuaState { host, keys: Vec::new(), tabs: Vec::new(), workspaces: Vec::new(), active: None, loads: 0 });
+    cx.set_global(LuaState {
+        host,
+        keys: Vec::new(),
+        tabs: Vec::new(),
+        workspaces: Vec::new(),
+        active: None,
+        loads: 0,
+        plugins: Vec::new(),
+        state,
+        notes: HashMap::new(),
+        grammars: HashMap::new(),
+    });
     cx.spawn(async move |cx| {
         while let Ok(ev) = events.recv_async().await {
             if cx.update(|cx| handle(ev, cx)).is_err() {
@@ -121,6 +217,8 @@ fn handle(ev: FromLua, cx: &mut App) {
             let st = cx.global_mut::<LuaState>();
             st.keys.clear();
             st.tabs.clear();
+            st.notes.clear();
+            crate::theme::clear_themes();
             rebind(cx);
             cx.refresh_windows();
         }
@@ -157,6 +255,48 @@ fn handle(ev: FromLua, cx: &mut App) {
                 cx.refresh_windows();
             }
         }
+        FromLua::Plugins(list) => {
+            let st = cx.global_mut::<LuaState>();
+            st.plugins = list;
+            // The chosen theme's extension is gone or disabled: back to the built-in theme.
+            let wanted = st.state.theme.clone();
+            if crate::theme::active_theme() != wanted || wanted.is_some() {
+                crate::theme::activate_theme(wanted.as_deref());
+            }
+            cx.refresh_windows();
+        }
+        FromLua::Theme(spec) => {
+            let name = spec.name.clone();
+            crate::theme::register_theme(spec);
+            if cx.global::<LuaState>().state.theme.as_deref() == Some(name.as_str()) {
+                crate::theme::activate_theme(Some(&name));
+            }
+            cx.refresh_windows();
+        }
+        FromLua::Language(spec) => {
+            let id = graphyne_core::language::register_plugin_language(&spec.name, &spec.extensions, &spec.file_names, spec.line_comment.as_deref(), spec.run.as_deref());
+            if let Some((command, args)) = &spec.lsp {
+                graphyne_lsp::servers::register_plugin_server(id, command, args);
+            }
+            let mut note = spec.grammar_error.clone();
+            if let (Some(g), graphyne_core::LanguageId::Plugin(ix)) = (&spec.grammar, id) {
+                let already = cx.global::<LuaState>().grammars.get(&ix) == Some(&g.library);
+                if !already {
+                    match graphyne_syntax::load_plugin_grammar(id, &g.library, &g.symbol, &g.highlights) {
+                        Ok(warning) => {
+                            cx.global_mut::<LuaState>().grammars.insert(ix, g.library.clone());
+                            note = warning;
+                        }
+                        Err(e) => note = Some(format!("grammar: {e}")),
+                    }
+                }
+            }
+            if let (Some(n), Some(plugin)) = (note, spec.plugin.clone()) {
+                cx.global_mut::<LuaState>().notes.entry(plugin).or_default().push(format!("{}: {n}", spec.name));
+            }
+            redetect_languages(cx);
+            cx.refresh_windows();
+        }
     }
 }
 
@@ -184,9 +324,8 @@ pub const INIT_TEMPLATE: &str = r#"-- Graphyne init.lua — runs at start-up and
 --   return { "first item", { text = "open README", on_click = function() graphyne.workspace.open("README.md") end } }
 -- end })
 
--- Plugins in ~/.config/graphyne/plugins run sandboxed (no os.execute, io.popen, ffi).
--- Grant access to one plugin:
--- graphyne.plugins.allow("my-plugin", { "os", "io", "ffi" })
+-- Extensions live in the plugins folder next to graphyne.exe; manage them on the
+-- Plugins page ("+" in the left panel, or the main menu). They run sandboxed.
 "#;
 
 /// "Open init.lua": create the config folder and a starter file if needed, then watch it.
@@ -195,7 +334,7 @@ pub fn ensure_init_file(cx: &mut App) -> Option<std::path::PathBuf> {
     let file = st.host.init_file();
     if !file.exists() {
         if let Some(dir) = file.parent() {
-            std::fs::create_dir_all(dir.join("plugins")).ok()?;
+            std::fs::create_dir_all(dir).ok()?;
         }
         std::fs::write(&file, INIT_TEMPLATE).ok()?;
     }

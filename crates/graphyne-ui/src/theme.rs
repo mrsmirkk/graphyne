@@ -40,12 +40,127 @@ pub mod c {
     pub const CLOSE_HOVER: u32 = 0xC42B1C;
 }
 
+/// UI colour tokens an extension theme can set (`graphyne.themes.register{ ui = {…} }`).
+pub const UI_TOKENS: &[(&str, u32)] = &[
+    ("canvas", c::CANVAS),
+    ("island", c::ISLAND),
+    ("border", c::BORDER),
+    ("active_line", c::ACTIVE_LINE),
+    ("popup", c::POPUP),
+    ("popup_border", c::POPUP_BORDER),
+    ("hover", c::HOVER),
+    ("pressed", c::PRESSED),
+    ("tab_active", c::TAB_ACTIVE),
+    ("tab_focused", c::TAB_FOCUSED),
+    ("tab_focused_border", c::TAB_FOCUSED_BORDER),
+    ("text", c::TEXT),
+    ("text_muted", c::TEXT_MUTED),
+    ("text_dim", c::TEXT_DIM),
+    ("text_faint", c::TEXT_FAINT),
+    ("accent", c::ACCENT),
+    ("accent_soft", c::ACCENT_SOFT),
+    ("selection", c::SELECTION),
+    ("selection_inactive", c::SELECTION_INACTIVE),
+    ("cursor", c::CURSOR),
+    ("match", c::MATCH),
+    ("green", c::GREEN),
+    ("blue", c::BLUE),
+    ("red", c::RED),
+    ("yellow", c::YELLOW),
+    ("orange", c::ORANGE),
+    ("git_modified", c::GIT_MODIFIED),
+    ("git_added", c::GIT_ADDED),
+    ("git_untracked", c::GIT_UNTRACKED),
+    ("git_deleted", c::GIT_DELETED),
+];
+
+/// Syntax tokens (`graphyne.themes.register{ syntax = {…} }`).
+pub const SYNTAX_TOKENS: &[(&str, HighlightKind)] = &[
+    ("plain", HighlightKind::Plain),
+    ("keyword", HighlightKind::Keyword),
+    ("string", HighlightKind::String),
+    ("escape", HighlightKind::Escape),
+    ("number", HighlightKind::Number),
+    ("comment", HighlightKind::Comment),
+    ("function", HighlightKind::Function),
+    ("method", HighlightKind::Method),
+    ("macro", HighlightKind::Macro),
+    ("type", HighlightKind::Type),
+    ("type_builtin", HighlightKind::TypeBuiltin),
+    ("constructor", HighlightKind::Constructor),
+    ("constant", HighlightKind::Constant),
+    ("constant_builtin", HighlightKind::ConstantBuiltin),
+    ("variable", HighlightKind::Variable),
+    ("variable_builtin", HighlightKind::VariableBuiltin),
+    ("parameter", HighlightKind::Parameter),
+    ("property", HighlightKind::Property),
+    ("attribute", HighlightKind::Attribute),
+    ("label", HighlightKind::Label),
+    ("operator", HighlightKind::Operator),
+    ("punctuation", HighlightKind::Punctuation),
+    ("tag", HighlightKind::Tag),
+    ("module", HighlightKind::Module),
+];
+
+struct ActiveTheme {
+    name: String,
+    ui: std::collections::HashMap<u32, u32>,
+    syntax: std::collections::HashMap<HighlightKind, u32>,
+}
+
+static ACTIVE_THEME: std::sync::RwLock<Option<ActiveTheme>> = std::sync::RwLock::new(None);
+static THEMES: std::sync::RwLock<Vec<graphyne_lua::ThemeSpec>> = std::sync::RwLock::new(Vec::new());
+
+/// Add or replace (by name) an extension theme.
+pub fn register_theme(spec: graphyne_lua::ThemeSpec) {
+    let mut themes = THEMES.write().unwrap_or_else(|e| e.into_inner());
+    themes.retain(|t| t.name != spec.name);
+    themes.push(spec);
+}
+
+/// Forget registered themes (a plugin reload re-registers them); the colours in use stay.
+pub fn clear_themes() {
+    THEMES.write().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+/// (name, extension id) of every registered theme.
+pub fn theme_list() -> Vec<(String, Option<String>)> {
+    THEMES.read().unwrap_or_else(|e| e.into_inner()).iter().map(|t| (t.name.clone(), t.plugin.clone())).collect()
+}
+
+pub fn active_theme() -> Option<String> {
+    ACTIVE_THEME.read().unwrap_or_else(|e| e.into_inner()).as_ref().map(|t| t.name.clone())
+}
+
+/// Switch to a registered theme (`None` = built-in Fleet Dark). Returns false when the
+/// name is not registered (the built-in theme is used then).
+pub fn activate_theme(name: Option<&str>) -> bool {
+    let themes = THEMES.read().unwrap_or_else(|e| e.into_inner());
+    let spec = name.and_then(|n| themes.iter().find(|t| t.name == n));
+    let active = spec.map(|t| ActiveTheme {
+        name: t.name.clone(),
+        ui: t.ui.iter().filter_map(|(k, v)| UI_TOKENS.iter().find(|(n, _)| n == k).map(|(_, def)| (*def, *v))).collect(),
+        syntax: t.syntax.iter().filter_map(|(k, v)| SYNTAX_TOKENS.iter().find(|(n, _)| n == k).map(|(_, kind)| (*kind, *v))).collect(),
+    });
+    let found = active.is_some() || name.is_none();
+    *ACTIVE_THEME.write().unwrap_or_else(|e| e.into_inner()) = active;
+    found
+}
+
+/// Built-in colour → active theme's colour.
+fn themed(hex: u32) -> u32 {
+    match ACTIVE_THEME.read() {
+        Ok(guard) => guard.as_ref().and_then(|t| t.ui.get(&hex).copied()).unwrap_or(hex),
+        Err(_) => hex,
+    }
+}
+
 pub fn color(hex: u32) -> Hsla {
-    rgb(hex).into()
+    rgb(themed(hex)).into()
 }
 
 pub fn color_a(hex: u32, alpha: f32) -> Hsla {
-    let c: Hsla = rgb(hex).into();
+    let c: Hsla = rgb(themed(hex)).into();
     c.opacity(alpha)
 }
 
@@ -56,7 +171,12 @@ pub fn rgba_u32(hex_rgba: u32) -> Rgba {
 /// Syntax colours ("Fleet Dark" pastel accents).
 pub fn syntax(kind: HighlightKind) -> Hsla {
     use HighlightKind::*;
-    color(match kind {
+    if let Some(v) = ACTIVE_THEME.read().ok().and_then(|g| g.as_ref().and_then(|t| t.syntax.get(&kind).copied())) {
+        return rgb(v).into();
+    }
+    // Syntax defaults bypass the UI token mapping.
+    let raw = |hex: u32| -> Hsla { rgb(hex).into() };
+    raw(match kind {
         Plain | Variable | Module => 0xD6D6DD,
         Keyword => 0x83D6C5,
         String => 0xE394DC,

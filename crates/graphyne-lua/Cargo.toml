@@ -11,3 +11,4 @@ flume.workspace = true
 log.workspace = true
 notify.workspace = true
 dirs.workspace = true
+serde_json.workspace = true

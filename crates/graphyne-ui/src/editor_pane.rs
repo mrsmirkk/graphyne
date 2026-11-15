@@ -5,6 +5,7 @@ use crate::components::{icon, island, island_header, kbd, tooltip};
 use crate::diff_view::{DiffEvent, DiffView, HunkSelection};
 use crate::editor::{Editor, EditorEvent};
 use crate::hex_view::HexView;
+use crate::plugins_page::PluginsPage;
 use crate::theme::{self, c, color, color_a};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Task, Window, div, px};
@@ -17,6 +18,8 @@ pub enum PaneItem {
     Hex(Entity<HexView>),
     /// Side-by-side comparison with HEAD (opened from the Git tab).
     Diff(Entity<DiffView>),
+    /// Installed extensions, permissions and theme.
+    Plugins(Entity<PluginsPage>),
 }
 
 impl PaneItem {
@@ -25,7 +28,7 @@ impl PaneItem {
             PaneItem::Editor(e) => e.read(cx).path.clone(),
             PaneItem::Hex(h) => Some(h.read(cx).path.clone()),
             // A diff tab never stands in for the file itself.
-            PaneItem::Diff(_) => None,
+            PaneItem::Diff(_) | PaneItem::Plugins(_) => None,
         }
     }
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -33,6 +36,7 @@ impl PaneItem {
             PaneItem::Editor(e) => e.focus_handle(cx),
             PaneItem::Hex(h) => h.focus_handle(cx),
             PaneItem::Diff(d) => d.focus_handle(cx),
+            PaneItem::Plugins(p) => p.focus_handle(cx),
         }
     }
 }
@@ -124,6 +128,22 @@ impl EditorPane {
                 }));
                 let at = (self.active + 1).min(self.items.len());
                 self.items.insert(at, PaneItem::Diff(view));
+                self.active = at;
+            }
+        }
+        self.focus_active(window, cx);
+        cx.emit(PaneEvent::Changed);
+        cx.notify();
+    }
+
+    /// Open (or focus) the Plugins page.
+    pub fn open_plugins_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.items.iter().position(|i| matches!(i, PaneItem::Plugins(_))) {
+            Some(ix) => self.active = ix,
+            None => {
+                let page = cx.new(PluginsPage::new);
+                let at = (self.active + 1).min(self.items.len());
+                self.items.insert(at, PaneItem::Plugins(page));
                 self.active = at;
             }
         }
@@ -335,8 +355,10 @@ impl Render for EditorPane {
                 }
                 PaneItem::Hex(h) => (h.read(cx).title(), LanguageId::PlainText, false),
                 PaneItem::Diff(d) => (d.read(cx).title().to_string(), LanguageId::PlainText, false),
+                PaneItem::Plugins(_) => ("Plugins".to_string(), LanguageId::PlainText, false),
             };
             let is_diff = matches!(item, PaneItem::Diff(_));
+            let is_plugins = matches!(item, PaneItem::Plugins(_));
             header = header.child(
                 div()
                     .id(("tab", ix))
@@ -363,7 +385,8 @@ impl Render for EditorPane {
                         cx.notify();
                     }))
                     .on_mouse_down(gpui::MouseButton::Middle, cx.listener(move |this, _, window, cx| this.close(ix, window, cx)))
-                    .child(crate::file_icons::file_icon(Path::new(&title)))
+                    .when(is_plugins, |d| d.child(icon(Icon::Puzzle, 14., color(c::ACCENT))))
+                    .when(!is_plugins, |d| d.child(crate::file_icons::file_icon(Path::new(&title))))
                     .child(title)
                     .when(is_diff, |d| {
                         d.child(div().px(px(4.)).rounded(px(3.)).bg(color_a(c::GIT_MODIFIED, 0.18)).text_size(px(10.5)).text_color(color(c::GIT_MODIFIED)).child("diff"))
@@ -396,6 +419,7 @@ impl Render for EditorPane {
             Some(PaneItem::Editor(e)) => e.clone().into_any_element(),
             Some(PaneItem::Hex(h)) => h.clone().into_any_element(),
             Some(PaneItem::Diff(d)) => d.clone().into_any_element(),
+            Some(PaneItem::Plugins(p)) => p.clone().into_any_element(),
             None => empty_state().into_any_element(),
         };
         let problems = self.render_problems(cx);

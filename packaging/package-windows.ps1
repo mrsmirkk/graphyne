@@ -24,6 +24,27 @@ New-Item -ItemType Directory -Force $out | Out-Null
 Copy-Item (Join-Path $root "target\release\graphyne.exe") $out
 Copy-Item (Join-Path $root "packaging\README.md") $out
 
+# Example extensions → plugins\ next to graphyne.exe. Grammar projects (grammar\Cargo.toml)
+# are built and their library copied in as <extension>.dll.
+$plugins = Join-Path $out "plugins"
+New-Item -ItemType Directory -Force $plugins | Out-Null
+Copy-Item (Join-Path $root "extensions\README.md") $plugins
+foreach ($ext in Get-ChildItem (Join-Path $root "extensions") -Directory) {
+    $dest = Join-Path $plugins $ext.Name
+    Copy-Item -Recurse $ext.FullName $dest
+    Remove-Item -Recurse -Force (Join-Path $dest "grammar") -ErrorAction SilentlyContinue
+    $grammar = Join-Path $ext.FullName "grammar"
+    if (Test-Path (Join-Path $grammar "Cargo.toml")) {
+        Push-Location $grammar
+        cargo build --release
+        $ok = $LASTEXITCODE -eq 0
+        Pop-Location
+        if (-not $ok) { throw "grammar build failed: $($ext.Name)" }
+        $dll = Get-ChildItem (Join-Path $grammar "target\release\*.dll") | Select-Object -First 1
+        Copy-Item $dll.FullName (Join-Path $dest "$($ext.Name).dll")
+    }
+}
+
 # Third-party notices: icon licences + every crate linked into the Windows build.
 $notices = New-Object System.Collections.Generic.List[string]
 $notices.Add("# Third-party notices")
@@ -38,6 +59,12 @@ $notices.Add("")
 $notices.Add('```')
 $notices.Add((Get-Content (Join-Path $root "assets\file-icons\LICENSE") -Raw -Encoding UTF8).Trim())
 $notices.Add('```')
+$notices.Add("")
+$notices.Add("## Example extensions")
+$notices.Add("")
+$notices.Add("plugins\zig: grammar library and highlights query from tree-sitter-zig 1.1.2 (MIT,")
+$notices.Add("https://github.com/tree-sitter-grammars/tree-sitter-zig). plugins\nord-theme: colours after")
+$notices.Add("the Nord palette (MIT, https://www.nordtheme.com).")
 $notices.Add("")
 $notices.Add("## Rust crates")
 $notices.Add("")
