@@ -7,7 +7,7 @@ use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{self, c, color, color_a};
 use gpui::prelude::*;
 use gpui::{
-    App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent, Pixels,
+    App, ClipboardItem, Context, DragMoveEvent, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent, Pixels,
     Point, SharedString, Subscription, UniformListScrollHandle, Window, anchored, deferred, div, px, uniform_list,
 };
 use graphyne_core::libraries::LibraryEntry;
@@ -76,6 +76,40 @@ struct TreeEdit {
     _subs: Vec<Subscription>,
 }
 
+/// A project file or folder being dragged in the tree.
+#[derive(Clone)]
+struct DraggedEntry {
+    path: PathBuf,
+    is_dir: bool,
+    name: SharedString,
+}
+
+/// What follows the mouse while an entry is dragged.
+struct DragPreview(DraggedEntry);
+
+impl Render for DragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let entry = &self.0;
+        let leading = if entry.is_dir { icon(Icon::Folder, 13., color(c::TEXT_MUTED)).into_any_element() } else { crate::file_icons::file_icon(&entry.path).into_any_element() };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .h(px(24.))
+            .px(px(8.))
+            .rounded(px(5.))
+            .bg(color(c::POPUP))
+            .border_1()
+            .border_color(color(c::POPUP_BORDER))
+            .shadow_md()
+            .font_family(theme::fonts().ui)
+            .text_size(px(theme::UI_TEXT))
+            .text_color(color(c::TEXT))
+            .child(leading)
+            .child(entry.name.clone())
+    }
+}
+
 pub struct FileTree {
     focus_handle: FocusHandle,
     root: PathBuf,
@@ -93,6 +127,8 @@ pub struct FileTree {
     edit: Option<TreeEdit>,
     /// "Delete …?" waiting for an answer, shown where the menu was.
     confirm_delete: Option<(PathBuf, bool, Point<Pixels>)>,
+    /// The folder a drag would drop into (it and its rows are tinted).
+    drop_target: Option<PathBuf>,
 }
 
 impl EventEmitter<FileTreeEvent> for FileTree {}
@@ -120,6 +156,7 @@ impl FileTree {
             menu: None,
             edit: None,
             confirm_delete: None,
+            drop_target: None,
         };
         tree.load_dir(root, cx);
         tree
@@ -330,8 +367,13 @@ impl FileTree {
     fn begin_edit(&mut self, kind: EditKind, dir: PathBuf, target: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
         self.confirm_delete = None;
-        if kind != EditKind::Rename && self.expanded.insert(dir.clone()) && !self.children.contains_key(&dir) {
-            self.load_dir(dir.clone(), cx);
+        if kind != EditKind::Rename {
+            let root = self.root.clone();
+            for d in dir.ancestors().take_while(|d| d.starts_with(&root)).map(Path::to_path_buf).collect::<Vec<_>>() {
+                if self.expanded.insert(d.clone()) && !self.children.contains_key(&d) {
+                    self.load_dir(d, cx);
+                }
+            }
         }
         let placeholder = match kind {
             EditKind::NewFile => "File name, e.g. main.py or src/app.py",
@@ -445,21 +487,135 @@ impl FileTree {
                     if !blur {
                         window.focus(&this.focus_handle);
                     }
-                    if let Some(old) = &target {
-                        this.paths_moved(old, &destination);
-                        cx.emit(FileTreeEvent::Renamed(old.clone(), destination.clone()));
-                    }
-                    for d in [destination.parent().map(Path::to_path_buf), target.as_ref().and_then(|t| t.parent()).map(Path::to_path_buf)].into_iter().flatten() {
-                        if this.expanded.contains(&d) {
-                            this.loading.remove(&d);
-                            this.load_dir(d, cx);
+                    match &target {
+                        Some(old) => this.finish_move(old, &destination, cx),
+                        None => {
+                            // `a/b/c.py` makes new folders too: re-read from the edit's folder down.
+                            for d in destination.ancestors().skip(1).take_while(|d| d.starts_with(&dir)) {
+                                this.reload(d, cx);
+                            }
+                            this.reveal(&destination, cx);
                         }
                     }
-                    this.reveal(&destination, cx);
                     if kind == EditKind::NewFile {
                         // Enter: start typing in the new file. Click elsewhere: just show it.
                         cx.emit(if blur { FileTreeEvent::PreviewFile(destination.clone()) } else { FileTreeEvent::OpenFile(destination.clone()) });
                     }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// File > New File / New Folder: the name field opens in `dir`, else in the selected folder
+    /// (or the selected file's folder), else at the project root.
+    pub fn new_item(&mut self, folder: bool, dir: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = dir.filter(|d| self.in_project(d) && d.is_dir()).unwrap_or_else(|| match self.selected.clone().filter(|s| self.in_project(s) && s.exists()) {
+            Some(sel) => self.target_dir(&sel, sel.is_dir()),
+            None => self.root.clone(),
+        });
+        self.begin_edit(if folder { EditKind::NewFolder } else { EditKind::NewFile }, dir, None, window, cx);
+    }
+
+    /// Re-read `dir` if it is shown; otherwise forget its cached listing.
+    fn reload(&mut self, dir: &Path, cx: &mut Context<Self>) {
+        if self.expanded.contains(dir) {
+            self.loading.remove(dir);
+            self.load_dir(dir.to_path_buf(), cx);
+        } else {
+            self.children.remove(dir);
+        }
+    }
+
+    /// After a rename or a move: tree state and open tabs follow, both folders are re-read and
+    /// the item is shown (its new folder opens).
+    fn finish_move(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
+        self.paths_moved(old, new);
+        cx.emit(FileTreeEvent::Renamed(old.to_path_buf(), new.to_path_buf()));
+        if let Some(parent) = new.parent().filter(|p| p.starts_with(&self.root)) {
+            self.expanded.insert(parent.to_path_buf());
+        }
+        for d in [old.parent(), new.parent()].into_iter().flatten() {
+            self.reload(d, cx);
+        }
+        self.reveal(new, cx);
+    }
+
+    // ------------------------------------------------------------------ drag and drop
+
+    /// The folder a drop on `row` goes into: the folder itself, or the file's folder.
+    fn drop_dir(row: &Row) -> PathBuf {
+        if row.is_dir { row.path.clone() } else { row.path.parent().map(Path::to_path_buf).unwrap_or_else(|| row.path.clone()) }
+    }
+
+    /// Not where it already is, and a folder never into itself.
+    fn can_move_into(drag: &DraggedEntry, dir: &Path) -> bool {
+        drag.path.parent() != Some(dir) && !dir.starts_with(&drag.path)
+    }
+
+    fn set_drop_target(&mut self, target: Option<PathBuf>, cx: &mut Context<Self>) {
+        if self.drop_target != target {
+            self.drop_target = target;
+            cx.notify();
+        }
+    }
+
+    /// Whether `y` is in the empty space under the last row (a drop there goes to the root).
+    fn below_rows(&self, y: Pixels) -> bool {
+        let scroll = self.scroll.0.borrow();
+        let top = scroll.base_handle.bounds().top() + scroll.base_handle.offset().y;
+        y > top + px(4. + self.rows.len() as f32 * 24.)
+    }
+
+    fn move_entry(&mut self, drag: DraggedEntry, dir: PathBuf, cx: &mut Context<Self>) {
+        self.drop_target = None;
+        cx.notify();
+        if !Self::can_move_into(&drag, &dir) || !self.in_project(&dir) || !self.in_project(&drag.path) {
+            return;
+        }
+        let (from, into) = (drag.path.clone(), dir);
+        cx.spawn(async move |this, cx| {
+            let done = cx.background_spawn(async move { graphyne_core::fs_ops::move_into(&from, &into) }).await;
+            this.update(cx, |this, cx| match done {
+                Ok(Some(to)) => this.finish_move(&drag.path, &to, cx),
+                Ok(None) => {}
+                Err(e) => cx.emit(FileTreeEvent::Error(format!("Could not move \u{201C}{}\u{201D}: {e}", drag.name))),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Files dropped from Explorer are copied into `dir`.
+    fn copy_in(&mut self, paths: Vec<PathBuf>, dir: PathBuf, cx: &mut Context<Self>) {
+        self.drop_target = None;
+        cx.notify();
+        if !self.in_project(&dir) {
+            return;
+        }
+        let into = dir.clone();
+        cx.spawn(async move |this, cx| {
+            let results: Vec<Result<PathBuf, String>> = cx
+                .background_spawn(async move {
+                    paths
+                        .iter()
+                        .map(|p| graphyne_core::fs_ops::copy_into(p, &into).map_err(|e| format!("Could not copy {}: {e}", p.display())))
+                        .collect()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.expanded.insert(dir.clone());
+                this.reload(&dir, cx);
+                let mut last = None;
+                for result in results {
+                    match result {
+                        Ok(path) => last = Some(path),
+                        Err(e) => cx.emit(FileTreeEvent::Error(e)),
+                    }
+                }
+                if let Some(path) = last {
+                    this.reveal(&path, cx);
                 }
             })
             .ok();
@@ -703,12 +859,47 @@ impl Render for FileTree {
         let edit = self.edit.as_ref().map(|e| (e.kind, e.target.clone(), e.input.clone(), e.error.clone()));
         let menu = self.menu.as_ref().map(|m| self.render_menu(m, cx).into_any_element());
         let confirm = self.confirm_delete.clone().map(|(p, is_dir, pos)| self.render_confirm(&p, is_dir, pos, cx).into_any_element());
+        let root = self.root.clone();
+        // A drag that ended outside the tree leaves no highlight behind.
+        let drop_target = if cx.has_active_drag() { self.drop_target.clone() } else { None };
+        let (root_move, root_copy, root_drop, root_drop_ext) = (root.clone(), root.clone(), root.clone(), root.clone());
         div()
             .id("file-tree")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
             .size_full()
             .pt(px(4.))
+            // The space under the rows takes drops into the project root; leaving the tree
+            // clears the target. (Rows run first and keep their own target.)
+            .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<DraggedEntry>, _, cx| {
+                if !ev.bounds.contains(&ev.event.position) {
+                    this.set_drop_target(None, cx);
+                } else if this.below_rows(ev.event.position.y) {
+                    let ok = Self::can_move_into(ev.drag(cx), &root_move);
+                    this.set_drop_target(ok.then(|| root_move.clone()), cx);
+                }
+            }))
+            .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<ExternalPaths>, _, cx| {
+                if !ev.bounds.contains(&ev.event.position) {
+                    this.set_drop_target(None, cx);
+                } else if this.below_rows(ev.event.position.y) {
+                    this.set_drop_target(Some(root_copy.clone()), cx);
+                }
+            }))
+            .on_drop(cx.listener(move |this, drag: &DraggedEntry, _, cx| {
+                if this.drop_target.as_ref() == Some(&root_drop) {
+                    this.move_entry(drag.clone(), root_drop.clone(), cx);
+                } else {
+                    this.set_drop_target(None, cx);
+                }
+            }))
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
+                if this.drop_target.as_ref() == Some(&root_drop_ext) {
+                    this.copy_in(paths.paths().to_vec(), root_drop_ext.clone(), cx);
+                } else {
+                    this.set_drop_target(None, cx);
+                }
+            }))
             .child(
                 uniform_list("file-tree-list", rows.len(), cx.processor(move |_this, range: std::ops::Range<usize>, _window, cx| {
                     range
@@ -751,7 +942,12 @@ impl Render for FileTree {
                                     .into_any_element(),
                                 None => div().whitespace_nowrap().overflow_hidden().text_ellipsis().child(row.name.clone()).into_any_element(),
                             };
-                            div()
+                            let in_project = row.path.starts_with(&root);
+                            let draggable = row.kind == RowKind::Entry && in_project && editing.is_none();
+                            let drop_dir = (matches!(row.kind, RowKind::Entry | RowKind::Root) && in_project).then(|| Self::drop_dir(row));
+                            // The target folder is tinted with everything shown inside it.
+                            let in_drop = drop_target.as_ref().is_some_and(|t| if *t == root { row.path == *t } else { row.path.starts_with(t) });
+                            let row_el = div()
                                 .id(ix)
                                 .flex()
                                 .items_center()
@@ -780,6 +976,44 @@ impl Render for FileTree {
                                 .children(leading)
                                 .child(label)
                                 .when(row.kind == RowKind::Root, |d| d.font_weight(gpui::FontWeight::MEDIUM))
+                                .when(in_drop, |d| d.bg(color_a(c::ACCENT, 0.16)));
+                            let row_el = if draggable {
+                                let dragged = DraggedEntry { path: row.path.clone(), is_dir: row.is_dir, name: row.name.clone() };
+                                row_el.on_drag(dragged, |d, _, _, cx| cx.new(|_| DragPreview(d.clone())))
+                            } else {
+                                row_el
+                            };
+                            match drop_dir {
+                                Some(dir) => {
+                                    let (to_move, to_copy, drop_move, drop_copy) = (dir.clone(), dir.clone(), dir.clone(), dir);
+                                    row_el
+                                        .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<DraggedEntry>, _, cx| {
+                                            if ev.bounds.contains(&ev.event.position) {
+                                                let ok = Self::can_move_into(ev.drag(cx), &to_move);
+                                                this.set_drop_target(ok.then(|| to_move.clone()), cx);
+                                            }
+                                        }))
+                                        .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<ExternalPaths>, _, cx| {
+                                            if ev.bounds.contains(&ev.event.position) {
+                                                this.set_drop_target(Some(to_copy.clone()), cx);
+                                            }
+                                        }))
+                                        .on_drop(cx.listener(move |this, drag: &DraggedEntry, _, cx| this.move_entry(drag.clone(), drop_move.clone(), cx)))
+                                        .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| this.copy_in(paths.paths().to_vec(), drop_copy.clone(), cx)))
+                                }
+                                // Libraries and the name field take no drops.
+                                None => row_el
+                                    .on_drag_move(cx.listener(|this, ev: &DragMoveEvent<DraggedEntry>, _, cx| {
+                                        if ev.bounds.contains(&ev.event.position) {
+                                            this.set_drop_target(None, cx);
+                                        }
+                                    }))
+                                    .on_drag_move(cx.listener(|this, ev: &DragMoveEvent<ExternalPaths>, _, cx| {
+                                        if ev.bounds.contains(&ev.event.position) {
+                                            this.set_drop_target(None, cx);
+                                        }
+                                    })),
+                            }
                         })
                         .collect()
                 }))

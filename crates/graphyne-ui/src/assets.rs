@@ -19,7 +19,7 @@ static ICONS: &[(&str, &[u8])] = icons![
     "win-min", "win-max", "win-restore", "win-close", "history", "commit", "refresh", "check", "warning",
     "error", "library", "structure", "shield", "terminal", "binary", "undo", "dot", "sparkle", "database",
     "bug", "pause", "resume", "step-over", "step-into", "step-out", "restart",
-    "file-plus", "folder-plus", "pencil", "trash", "copy", "folder-open",
+    "file-plus", "folder-plus", "pencil", "trash", "copy", "folder-open", "menu",
 ];
 
 pub struct Assets;
@@ -99,6 +99,7 @@ pub enum Icon {
     Trash,
     Copy,
     FolderOpen,
+    Menu,
 }
 
 impl Icon {
@@ -165,6 +166,7 @@ impl Icon {
             Trash => "icons/trash.svg",
             Copy => "icons/copy.svg",
             FolderOpen => "icons/folder-open.svg",
+            Menu => "icons/menu.svg",
         }
     }
 }

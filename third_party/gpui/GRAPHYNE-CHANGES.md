@@ -25,6 +25,10 @@ from `Cargo.toml`. Everything else is unchanged except:
   restore. The position now uses the target display's scale (`WindowsDisplay::scale_factor`)
   and the size takes back the resize-border growth of WM_DPICHANGED. Nothing changes when all
   monitors share one scale.
+- `src/platform.rs`, `src/platform/windows/platform.rs` — `PathPromptOptions::directory`: the
+  folder an open dialog starts in (File > Open File… opens in the project, not wherever the last
+  dialog of any app was). Used on Windows like the existing folder of the save dialog; other
+  platforms ignore it.
 
 To update gpui: copy the new release over this folder (minus `examples/`, `docs/`), drop the
 `[[example]]` tables again and re-apply the changes above.

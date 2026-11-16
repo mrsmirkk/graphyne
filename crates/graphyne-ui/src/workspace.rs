@@ -18,20 +18,22 @@ use crate::theme::{self, c, color, color_a};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, CursorStyle, Entity, FocusHandle, Focusable, ModifiersChangedEvent, MouseButton,
-    MouseMoveEvent, Pixels, SharedString, Subscription, TitlebarOptions, Window, WindowBounds, WindowControlArea,
+    MouseMoveEvent, PathPromptOptions, Pixels, SharedString, Subscription, TitlebarOptions, Window, WindowBounds, WindowControlArea,
     WindowDecorations, WindowHandle, WindowOptions, div, point, px, size,
 };
 use graphyne_core::LanguageId;
 use graphyne_core::session::{self, ProjectState, WindowState};
 use graphyne_core::run::{RunPlan, ShellKind};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Title-bar dropdowns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Menu {
+    /// The ☰ at the left of the title bar: new / open / save / close.
+    File,
     Projects,
     Run,
     App,
@@ -1013,6 +1015,92 @@ impl Workspace {
             t.detach();
         }
     }
+    fn new_file(&mut self, _: &NewFile, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_tree_item(false, window, cx);
+    }
+    fn new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_tree_item(true, window, cx);
+    }
+    /// New File / New Folder: the name is typed in the project tree, in the selected folder
+    /// (the active file's folder after opening a file).
+    fn new_tree_item(&mut self, folder: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.left = true;
+        self.left_tab = LeftTab::Files;
+        self.file_tree.update(cx, |t, cx| t.new_item(folder, None, window, cx));
+        cx.notify();
+    }
+    fn open_file_action(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        cx.notify();
+        // Start where the user works: the active file's folder, else the project.
+        let directory = self.pane.read(cx).active_editor().and_then(|e| e.read(cx).path.as_deref().and_then(Path::parent).map(Path::to_path_buf)).unwrap_or_else(|| self.root.clone());
+        let picked = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Open".into()), directory: Some(directory) });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = picked.await {
+                this.update_in(cx, |this, window, cx| {
+                    for path in paths {
+                        this.open_file(path, None, window, cx);
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+    fn save_file(&mut self, _: &SaveFile, _: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        if let Some(editor) = self.pane.read(cx).active_editor() {
+            if let Some(task) = editor.update(cx, |e, cx| e.save(cx)) {
+                task.detach();
+            }
+        }
+        cx.notify();
+    }
+    /// Save As: a Windows save dialog, then the tab continues as the new file.
+    fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        cx.notify();
+        let Some(editor) = self.pane.read(cx).active_editor() else {
+            self.notify_user("Save As: open a file in the editor first.", false, cx);
+            return;
+        };
+        let current = editor.read(cx).path.clone();
+        let dir = current.as_deref().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(|| self.root.clone());
+        let name = current.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().to_string());
+        let picked = cx.prompt_for_new_path(&dir, name.as_deref());
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(path))) = picked.await else { return };
+            if current.as_ref() == Some(&path) {
+                // The same file: just save it.
+                if let Ok(Some(task)) = editor.update(cx, |e, cx| e.save(cx)) {
+                    task.await;
+                }
+                return;
+            }
+            let Ok(task) = editor.update(cx, |e, cx| e.save_as(path.clone(), cx)) else { return };
+            let result = task.await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(()) => {
+                    this.pane.update(cx, |p, cx| p.close_duplicates(&editor, window, cx));
+                    if path.starts_with(&this.root) {
+                        this.file_tree.update(cx, |t, cx| {
+                            t.refresh(cx);
+                            t.reveal(&path, cx);
+                        });
+                    }
+                }
+                Err(e) => this.notify_user(format!("Could not save {}: {e}", path.display()), true, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+    fn close_all_tabs(&mut self, _: &CloseAllTabs, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.pane.update(cx, |p, cx| p.close_all(window, cx));
+        cx.notify();
+    }
     fn find_in_files(&mut self, _: &FindInFiles, window: &mut Window, cx: &mut Context<Self>) {
         self.left = true;
         self.left_tab = LeftTab::Search;
@@ -1127,6 +1215,11 @@ impl Workspace {
             IdeAction::DetachTerminal => self.toggle_detach(window, cx),
             IdeAction::FindInFiles => self.find_in_files(&FindInFiles, window, cx),
             IdeAction::SaveAll => self.save_all(&SaveAll, window, cx),
+            IdeAction::NewFile => self.new_file(&NewFile, window, cx),
+            IdeAction::NewFolder => self.new_folder(&NewFolder, window, cx),
+            IdeAction::OpenFile => self.open_file_action(&OpenFile, window, cx),
+            IdeAction::SaveAs => self.save_as(&SaveAs, window, cx),
+            IdeAction::CloseAllTabs => self.close_all_tabs(&CloseAllTabs, window, cx),
             IdeAction::GitPanel => {
                 self.left = true;
                 self.left_tab = LeftTab::Git;
@@ -1414,6 +1507,12 @@ impl Workspace {
             .gap(px(2.))
             .when(cfg!(target_os = "macos"), |d| d.pl(px(72.)))
             .child(
+                title_button("file-menu", Icon::Menu, if self.menu == Some(Menu::File) { color(c::TEXT) } else { tint })
+                    .when(self.menu != Some(Menu::File), |b| b.tooltip(tooltip("File", None)))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::File, cx))),
+            )
+            .child(vsep())
+            .child(
                 title_button("toggle-left", if self.left { Icon::PanelLeftOn } else { Icon::PanelLeft }, if self.left { color(c::TEXT) } else { tint })
                     .tooltip(tooltip("Left Panel", Some("Ctrl+1")))
                     .on_click(cx.listener(|this, _, w, cx| this.toggle_left(&ToggleLeftDock, w, cx))),
@@ -1431,7 +1530,7 @@ impl Workspace {
             .child(vsep())
             .child(
                 title_button("workspaces", Icon::Grid, if self.menu == Some(Menu::Projects) { color(c::TEXT) } else { tint })
-                    .tooltip(tooltip("Projects", None))
+                    .when(self.menu != Some(Menu::Projects), |b| b.tooltip(tooltip("Projects", None)))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Projects, cx))),
             );
 
@@ -1538,7 +1637,7 @@ impl Workspace {
             )
             .child(
                 title_button("settings", Icon::Settings, if self.menu == Some(Menu::App) { color(c::TEXT) } else { tint })
-                    .tooltip(tooltip("Main Menu", None))
+                    .when(self.menu != Some(Menu::App), |b| b.tooltip(tooltip("Main Menu", None)))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::App, cx))),
             )
             .when(!cfg!(target_os = "macos"), |d| d.child(div().w(px(8.))).child(caption_buttons(window.is_maximized(), cx)));
@@ -2036,6 +2135,42 @@ impl Workspace {
                 cx.notify();
             }));
         Some(match menu {
+            Menu::File => {
+                let has_editor = self.pane.read(cx).active_editor().is_some();
+                let separator = || div().mx(px(6.)).my(px(4.)).h(px(1.)).bg(color(c::BORDER));
+                // Disabled entries stay visible (dimmed), so the menu doesn't change shape.
+                let mut action = |id: &'static str, label: &'static str, shortcut: Option<&'static str>, enabled: bool, act: Box<dyn gpui::Action>| {
+                    let row = item(id, label.into(), None, shortcut);
+                    if enabled {
+                        row.on_click(cx.listener(move |this, _, window, cx| {
+                            this.menu = None;
+                            window.dispatch_action(act.boxed_clone(), cx);
+                            cx.notify();
+                        }))
+                    } else {
+                        row.opacity(0.45).cursor_default()
+                    }
+                };
+                panel
+                    .left(px(8.))
+                    .w(px(300.))
+                    .max_h(px(560.))
+                    .child(action("file-new", "New File…", Some("Alt+Insert"), true, Box::new(NewFile)))
+                    .child(action("file-new-folder", "New Folder…", None, true, Box::new(NewFolder)))
+                    .child(action("file-open", "Open File…", Some("Ctrl+O"), true, Box::new(OpenFile)))
+                    .child(open_folder)
+                    .child(separator())
+                    .child(action("file-save", "Save", Some("Ctrl+S"), has_editor, Box::new(SaveFile)))
+                    .child(action("file-save-as", "Save As…", Some("Ctrl+Shift+S"), has_editor, Box::new(SaveAs)))
+                    .child(action("file-save-all", "Save All", Some("Ctrl+Alt+S"), true, Box::new(SaveAll)))
+                    .child(separator())
+                    .child(action("file-close-tab", "Close Tab", Some("Ctrl+F4"), true, Box::new(CloseActiveTab)))
+                    .child(action("file-close-all", "Close All Tabs", None, true, Box::new(CloseAllTabs)))
+                    .child(close_project)
+                    .child(separator())
+                    .child(action("file-settings", "Settings…", Some("Ctrl+,"), true, Box::new(OpenSettings)))
+                    .child(action("file-exit", "Exit", None, true, Box::new(Quit)))
+            }
             Menu::Projects => {
                 let current = self.root.clone();
                 let recent: Vec<PathBuf> = self.recent.iter().filter(|p| **p != current).take(10).cloned().collect();
@@ -2335,6 +2470,12 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::prev_tab))
             .on_action(cx.listener(Self::save_all))
+            .on_action(cx.listener(Self::new_file))
+            .on_action(cx.listener(Self::new_folder))
+            .on_action(cx.listener(Self::open_file_action))
+            .on_action(cx.listener(Self::save_file))
+            .on_action(cx.listener(Self::save_as))
+            .on_action(cx.listener(Self::close_all_tabs))
             .on_action(cx.listener(Self::find_in_files))
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::search_action))

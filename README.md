@@ -124,6 +124,10 @@ single portable `.exe`.
   (`src/utils/io.py` creates the folders too), `F2` renames, `Delete` moves to the **Recycle Bin**
   after a confirmation, and open tabs follow renamed files and folders. A single click previews a
   file and keeps the keyboard in the tree; a double click moves it to the editor.
+- **Drag and drop** in the tree moves files and folders (the target folder is highlighted; open
+  tabs follow). Files and folders dropped from Explorer are **copied** into the project.
+- A **File menu** (☰ at the left of the title bar): New File / Folder, Open File, Open Folder,
+  Save, **Save As**, Save All, Close Tab, Close All Tabs, Close Project, Settings, Exit.
 - **Search Everywhere** (`Shift Shift` / `Ctrl+K`) for files, symbols and actions; **Find in
   Files** (`Ctrl+Shift+F`).
 - **External Libraries**: the standard library and dependencies (Cargo, Python `site-packages`)
@@ -146,8 +150,6 @@ single portable `.exe`.
 
 Planned, roughly in this order:
 
-- [ ] **Drag and drop in the project tree** — move files and folders with the mouse (new file /
-      folder, rename and delete are done).
 - [ ] **Databases** — connections to PostgreSQL, MySQL and SQLite, a schema browser and a
       virtualized **DataGrid** for query results.
 - [ ] **Keymap editor** in Settings.
@@ -184,6 +186,7 @@ tells you when something is missing.
 | All actions | `Ctrl+Shift+O` |
 | Find in Files | `Ctrl+Shift+F` |
 | Project tree: rename / delete to the Recycle Bin | `F2` / `Delete` |
+| New file / open file | `Alt+Insert` / `Ctrl+O` |
 | Settings | `Ctrl+,` |
 | Run current file | `Shift+F10` (or `Ctrl+R`) |
 | Debug / continue / step over / into / out / stop | `Shift+F9` / `F9` / `F8` / `F7` / `Shift+F8` / `Ctrl+F2` |
@@ -197,7 +200,7 @@ tells you when something is missing.
 | Terminal: show / new tab / detach | `Ctrl+J` / `Ctrl+Shift+T` / `Alt+Shift+F12` |
 | Left / right panel | `Ctrl+1` / `Ctrl+Alt+B` |
 | Next / previous tab, close tab | `Ctrl+Tab` / `Ctrl+Shift+Tab`, `Ctrl+F4` |
-| Save / save all | `Ctrl+S` / `Ctrl+Alt+S` |
+| Save / save as / save all | `Ctrl+S` / `Ctrl+Shift+S` / `Ctrl+Alt+S` |
 
 ## Extensions
 

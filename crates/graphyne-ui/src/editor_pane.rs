@@ -451,6 +451,40 @@ impl EditorPane {
         cx.notify();
     }
 
+    /// File > Close All Tabs (editors are saved first, as on a single close).
+    pub fn close_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for item in &self.items {
+            if let PaneItem::Editor(e) = item {
+                if let Some(task) = e.update(cx, |e, cx| e.save(cx)) {
+                    task.detach();
+                }
+            }
+        }
+        self.items.clear();
+        self.active = 0;
+        self.focus_active(window, cx);
+        cx.emit(PaneEvent::Changed);
+        cx.notify();
+    }
+
+    /// After Save As onto a file that is open in another tab: that tab goes (unsaved — the
+    /// file now holds this editor's text), `editor` stays active.
+    pub fn close_duplicates(&mut self, editor: &Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = editor.read(cx).path.clone() else { return };
+        let key = dunce_like(&path).to_string_lossy().to_lowercase();
+        let before = self.items.len();
+        self.items.retain(|item| match item {
+            PaneItem::Editor(e) if e == editor => true,
+            _ => item.path(cx).is_none_or(|p| dunce_like(&p).to_string_lossy().to_lowercase() != key),
+        });
+        if self.items.len() != before {
+            self.active = self.items.iter().position(|i| matches!(i, PaneItem::Editor(e) if e == editor)).unwrap_or(0);
+            self.focus_active(window, cx);
+        }
+        cx.emit(PaneEvent::Changed);
+        cx.notify();
+    }
+
     pub fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close(self.active, window, cx);
     }

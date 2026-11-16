@@ -79,6 +79,49 @@ pub fn rename(from: &Path, to: &Path) -> Result<(), String> {
     std::fs::rename(from, to).map_err(|e| e.to_string())
 }
 
+/// Drag and drop in the tree: move `from` into the folder `dir`. `Ok(None)` when it is already
+/// there; refuses to move a folder into itself or over an existing name.
+pub fn move_into(from: &Path, dir: &Path) -> Result<Option<PathBuf>, String> {
+    if from.parent() == Some(dir) {
+        return Ok(None);
+    }
+    if dir.starts_with(from) {
+        return Err("A folder can't be moved into itself".into());
+    }
+    let name = from.file_name().ok_or("Nothing to move")?;
+    let to = dir.join(name);
+    rename(from, &to)?;
+    Ok(Some(to))
+}
+
+/// Files dropped from Explorer: copy `src` (a file, or a folder with everything in it) into
+/// `dir`. Refuses to overwrite.
+pub fn copy_into(src: &Path, dir: &Path) -> Result<PathBuf, String> {
+    let name = src.file_name().ok_or("Nothing to copy")?;
+    let to = dir.join(name);
+    if to.exists() {
+        return Err(already_exists(&to));
+    }
+    if dir.starts_with(src) {
+        return Err("A folder can't be copied into itself".into());
+    }
+    copy_recursive(src, &to).map_err(|e| e.to_string())?;
+    Ok(to)
+}
+
+fn copy_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(from)?.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to).map(drop)
+    }
+}
+
 /// Move a file or folder to the Recycle Bin (recoverable), not a permanent delete.
 ///
 /// Runs on a thread of its own: `trash` sets COM up as a single-threaded apartment and
@@ -124,6 +167,34 @@ mod tests {
         assert!(rename(&file, &renamed).is_err());
         rename(&renamed, &dir.join("src").join("utils").join("Files.py")).unwrap();
         assert!(new_item_path(&dir, "ok/bad?name").is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drag_and_drop_moves_and_copies() {
+        let dir = std::env::temp_dir().join(format!("graphyne-dnd-{}", std::process::id()));
+        let (src, docs) = (dir.join("src"), dir.join("docs"));
+        create_file(&src.join("app").join("main.py")).unwrap();
+        create_dir(&docs).unwrap();
+        // Same folder: nothing to do. Into itself or its own subfolder: refused.
+        assert_eq!(move_into(&src.join("app"), &src), Ok(None));
+        assert!(move_into(&src, &src.join("app")).is_err());
+        assert!(move_into(&src, &src).is_err());
+        // A folder moves with its content.
+        let moved = move_into(&src.join("app"), &docs).unwrap().unwrap();
+        assert_eq!(moved, docs.join("app"));
+        assert!(docs.join("app").join("main.py").is_file() && !src.join("app").exists());
+        // A name already taken in the target folder is refused, the file stays.
+        create_file(&src.join("app")).unwrap();
+        assert!(move_into(&src.join("app"), &docs).unwrap_err().contains("already exists"));
+        assert!(src.join("app").is_file());
+        // Copy (files dropped from Explorer): folders recursively, never over an existing name.
+        let copied = copy_into(&docs.join("app"), &src.join("..").join("src")).unwrap_err();
+        assert!(copied.contains("already exists"));
+        std::fs::remove_file(src.join("app")).unwrap();
+        assert_eq!(copy_into(&docs.join("app"), &src).unwrap(), src.join("app"));
+        assert!(src.join("app").join("main.py").is_file() && docs.join("app").join("main.py").is_file());
+        assert!(copy_into(&docs, &docs.join("app")).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

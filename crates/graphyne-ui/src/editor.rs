@@ -463,6 +463,39 @@ impl Editor {
         self.write_to_disk(cx)
     }
 
+    /// File > Save As: write the text to `path` and go on editing that file (the tab follows;
+    /// the old file keeps what was last saved to it).
+    pub fn save_as(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<Result<(), String>> {
+        self.autosave_task = None;
+        let rope = self.buffer.rope().clone();
+        let line_ending = self.buffer.line_ending();
+        let version = self.buffer.version();
+        cx.spawn(async move |this, cx| {
+            let target = path.clone();
+            let result = cx
+                .background_spawn(async move {
+                    let text = Buffer::render_for_save(&rope, line_ending);
+                    graphyne_core::fs_util::atomic_write(&target, text.as_bytes())
+                })
+                .await;
+            match result {
+                Err(err) => Err(format!("{err:#}")),
+                Ok(()) => {
+                    this.update(cx, |this, cx| {
+                        this.set_path(path, cx);
+                        this.buffer.mark_saved(version);
+                        this.save_error = None;
+                        this.lsp_did_save();
+                        cx.emit(EditorEvent::Saved);
+                        cx.notify();
+                    })
+                    .ok();
+                    Ok(())
+                }
+            }
+        })
+    }
+
     fn write_to_disk(&mut self, cx: &mut Context<Self>) -> Option<Task<()>> {
         let path = self.path.clone()?;
         if !self.buffer.is_dirty() {

@@ -257,7 +257,7 @@ fn session_same(a: &Path, b: &Path) -> bool {
 
 /// "Open Folder…": native folder picker, then a new project window.
 pub(crate) fn prompt_open_folder(cx: &mut App) {
-    let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Open Project".into()) });
+    let picked = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Open Project".into()), directory: None });
     cx.spawn(async move |cx| {
         if let Ok(Ok(Some(paths))) = picked.await {
             if let Some(root) = paths.into_iter().next() {

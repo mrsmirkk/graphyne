@@ -942,6 +942,18 @@ fn file_open_dialog(
         dialog_options |= FOS_PICKFOLDERS;
     }
 
+    // Graphyne: open in the requested folder (as the save dialog does), not the last one used.
+    if let Some(full_path) = options
+        .directory
+        .as_ref()
+        .and_then(|dir| dir.canonicalize().context("failed to canonicalize directory").log_err())
+    {
+        let full_path = SanitizedPath::new(&full_path).to_string();
+        if let Some(item) = unsafe { SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(full_path), None) }.log_err() {
+            unsafe { folder_dialog.SetFolder(&item).context("failed to set dialog folder").log_err() };
+        }
+    }
+
     unsafe {
         folder_dialog.SetOptions(dialog_options)?;
 

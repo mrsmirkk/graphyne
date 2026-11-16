@@ -1336,6 +1336,8 @@ pub struct PathPromptOptions {
     pub multiple: bool,
     /// The prompt to show to a user when selecting a path
     pub prompt: Option<SharedString>,
+    /// The folder the dialog opens in (Windows; elsewhere the platform default). Graphyne.
+    pub directory: Option<PathBuf>,
 }
 
 /// What kind of prompt styling to show
