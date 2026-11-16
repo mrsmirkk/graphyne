@@ -18,6 +18,13 @@ from `Cargo.toml`. Everything else is unchanged except:
   type Latin letters, `Keystroke.key` is now the US-layout character of the physical key
   (`us_layout_key`, `layout_is_non_latin`, cached per layout); `key_char` and typed text
   still follow the active layout.
+- `src/platform/windows/window.rs`, `display.rs` — window placement on monitors with different
+  scale factors: the requested bounds are in the target display's logical pixels, but were
+  converted with the scale of the monitor the window is created on (the primary). A window
+  restored on a 125 % monitor next to a 100 % one opened across both and moved on every
+  restore. The position now uses the target display's scale (`WindowsDisplay::scale_factor`)
+  and the size takes back the resize-border growth of WM_DPICHANGED. Nothing changes when all
+  monitors share one scale.
 
 To update gpui: copy the new release over this folder (minus `examples/`, `docs/`), drop the
 `[[example]]` tables again and re-apply the changes above.

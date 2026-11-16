@@ -144,6 +144,11 @@ impl WindowsDisplay {
     }
 
     /// Check if the center point of given bounds is inside this monitor
+    /// Graphyne: this monitor's scale factor (window placement on mixed-DPI setups).
+    pub(crate) fn scale_factor(&self) -> f32 {
+        self.scale_factor
+    }
+
     pub fn check_given_bounds(&self, bounds: Bounds<Pixels>) -> bool {
         let center = bounds.center();
         let center = POINT {

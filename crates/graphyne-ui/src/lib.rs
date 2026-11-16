@@ -23,6 +23,7 @@ mod terminal_view;
 mod text_input;
 mod theme;
 mod welcome;
+mod window_fit;
 mod workspace;
 
 use gpui::{App, AppContext, Application, Bounds, PathPromptOptions, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions, point, px, size};
@@ -159,19 +160,20 @@ pub(crate) fn quit_app(cx: &mut App) {
     });
 }
 
-/// Where a project window goes: its saved place if that is still on a connected display.
-fn saved_bounds(state: Option<&ProjectState>, cx: &App) -> Option<WindowBounds> {
+/// Where a project window goes: its saved place if that is still on a connected display —
+/// shrunk and moved to fit that screen (it may have been saved on a bigger one). Returns the
+/// display too: GPUI converts the bounds with that display's scale factor.
+fn saved_bounds(state: Option<&ProjectState>, cx: &App) -> Option<(WindowBounds, gpui::DisplayId)> {
     let w = state?.window?;
     if w.width < 400. || w.height < 300. {
         return None;
     }
     let bounds = Bounds::new(point(px(w.x), px(w.y)), size(px(w.width), px(w.height)));
-    // The title bar must be reachable (a monitor may have been unplugged since).
-    let title = Bounds::new(point(px(w.x + 40.), px(w.y)), size(px((w.width - 80.).max(40.)), px(32.)));
-    if !cx.displays().iter().any(|d| d.bounds().intersects(&title)) {
-        return None;
-    }
-    Some(if w.maximized { WindowBounds::Maximized(bounds) } else { WindowBounds::Windowed(bounds) })
+    let displays = cx.displays();
+    let primary = cx.primary_display().and_then(|p| displays.iter().position(|d| d.id() == p.id()));
+    let ix = window_fit::pick_display(&displays.iter().map(|d| d.bounds()).collect::<Vec<_>>(), primary, bounds)?;
+    let bounds = window_fit::fit_saved(displays[ix].bounds(), bounds);
+    Some((if w.maximized { WindowBounds::Maximized(bounds) } else { WindowBounds::Windowed(bounds) }, displays[ix].id()))
 }
 
 /// Open `root` in a project window with its layout from last time (also used by Open
@@ -186,9 +188,13 @@ pub(crate) fn open_workspace(root: PathBuf, mark: impl Fn(&str) + Copy + 'static
     }
     let root_for_recent = root.clone();
     let state = session::load_project(&root);
-    let bounds = saved_bounds(state.as_ref(), cx).unwrap_or_else(|| WindowBounds::Windowed(Bounds::centered(None, size(px(1440.), px(900.)), cx)));
+    let (bounds, display_id) = match saved_bounds(state.as_ref(), cx) {
+        Some((bounds, display)) => (bounds, Some(display)),
+        None => (window_fit::new_window(window_fit::PROJECT, cx), None),
+    };
     let options = WindowOptions {
         window_bounds: Some(bounds),
+        display_id,
         titlebar: Some(TitlebarOptions {
             title: Some(format!("{} \u{2014} Graphyne", graphyne_core::project::project_name(&root)).into()),
             appears_transparent: true,

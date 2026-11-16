@@ -1311,7 +1311,25 @@ fn retrieve_window_placement(
     } else {
         display.default_bounds()
     };
-    let bounds = bounds.to_device_pixels(scale_factor);
+    // Graphyne: the bounds are in the target display's logical pixels (as its `bounds()`
+    // are), so the position is converted with that display's scale. The size keeps the scale
+    // the window was created with: Windows rescales it (WM_DPICHANGED) once the window lands
+    // on a monitor with another DPI. With one scale for all monitors this changes nothing.
+    let mut size = bounds.size.to_device_pixels(scale_factor);
+    let ratio = display.scale_factor() / scale_factor;
+    if (ratio - 1.0).abs() > 0.01 {
+        // On WM_DPICHANGED Windows scales the whole window rect by `ratio`, resize borders
+        // included, but the borders hardly grow on the new monitor: without taking that
+        // growth back the client area gets a few pixels bigger on every restore.
+        let shrink = 1.0 - 1.0 / ratio;
+        size.width = DevicePixels(size.width.0 - (border_offset.width_offset as f32 * shrink).round() as i32);
+        size.height = DevicePixels(size.height.0 - (border_offset.height_offset as f32 * shrink).round() as i32);
+    }
+    let origin = point(
+        DevicePixels((f32::from(bounds.origin.x) * display.scale_factor()).round() as i32),
+        DevicePixels((f32::from(bounds.origin.y) * display.scale_factor()).round() as i32),
+    );
+    let bounds = Bounds { origin, size };
     placement.rcNormalPosition = calculate_window_rect(bounds, border_offset);
     Ok(placement)
 }

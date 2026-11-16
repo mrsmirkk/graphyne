@@ -7,7 +7,7 @@ use crate::theme::{self, c, color, color_a};
 use crate::workspace::caption_buttons;
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, FocusHandle, Focusable, KeyDownEvent, SharedString, TitlebarOptions, Window, WindowBounds,
+    App, Context, FocusHandle, Focusable, KeyDownEvent, SharedString, TitlebarOptions, Window,
     WindowControlArea, WindowDecorations, WindowOptions, div, point, px, size,
 };
 use std::path::PathBuf;
@@ -32,9 +32,8 @@ pub fn open_welcome(cx: &mut App) {
         existing.update(cx, |_, window, _| window.activate_window()).ok();
         return;
     }
-    let bounds = Bounds::centered(None, size(px(880.), px(580.)), cx);
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_bounds: Some(crate::window_fit::new_window(crate::window_fit::WELCOME, cx)),
         titlebar: Some(TitlebarOptions {
             title: Some("Welcome to Graphyne".into()),
             appears_transparent: true,

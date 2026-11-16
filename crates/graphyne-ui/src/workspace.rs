@@ -17,7 +17,7 @@ use crate::terminal_view::{DetachedTerminal, TerminalPanel, TerminalPanelEvent};
 use crate::theme::{self, c, color, color_a};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, ModifiersChangedEvent, MouseButton,
+    AnyElement, App, Context, CursorStyle, Entity, FocusHandle, Focusable, ModifiersChangedEvent, MouseButton,
     MouseMoveEvent, Pixels, SharedString, Subscription, TitlebarOptions, Window, WindowBounds, WindowControlArea,
     WindowDecorations, WindowHandle, WindowOptions, div, point, px, size,
 };
@@ -1278,7 +1278,7 @@ impl Workspace {
         let title: SharedString = format!("Terminal — {}", self.project_name).into();
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions { title: Some(title.clone()), appears_transparent: true, traffic_light_position: Some(point(px(12.), px(12.))) }),
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(980.), px(600.)), cx))),
+            window_bounds: Some(crate::window_fit::new_window(crate::window_fit::TERMINAL, cx)),
             window_decorations: Some(WindowDecorations::Client),
             window_min_size: Some(size(px(420.), px(240.))),
             app_id: Some("graphyne".into()),

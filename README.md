@@ -125,6 +125,9 @@ single portable `.exe`.
   right in the file tree.
 - **Welcome screen** with recent projects, one window per project, **session restore** on launch,
   and **Close Project** to go back to the Welcome screen.
+- Windows open at a size that follows the screen and its scaling (maximized on small laptop
+  screens), and come back on the monitor they were closed on — shrunk to fit if that screen is
+  smaller now.
 
 ### Settings
 - A native **Settings** tab (`Ctrl+,`), saved to `settings.json`:
