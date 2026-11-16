@@ -11,6 +11,7 @@
 //! * [`session`]   — what was open at exit (projects, tabs, cursors, panels, window).
 
 pub mod buffer;
+pub mod fs_ops;
 pub mod fs_util;
 pub mod fuzzy;
 pub mod language;

@@ -1650,6 +1650,29 @@ impl Editor {
         self.buffer.len_lines() - hidden.min(self.buffer.len_lines()) + self.lenses.len() - self.hidden_lenses_before(usize::MAX)
     }
 
+    /// The file was renamed or moved on disk: follow it. The language server closes the old
+    /// document and opens the new one (whose language may differ, e.g. `.txt` → `.py`).
+    pub fn set_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.path.as_ref() == Some(&path) {
+            return;
+        }
+        self.lsp_close();
+        self.lsp.client = None;
+        self.lsp.subs.clear();
+        self.lsp.diags_src = None;
+        self.lsp.diags = Arc::new(Vec::new());
+        self.path = Some(path.clone());
+        let lang = LanguageId::from_path(&path);
+        if lang != self.language {
+            self.language = lang;
+            self.tree = None;
+            self.schedule_reparse(cx);
+        }
+        self.lsp_init(cx);
+        self.load_git_base(cx);
+        cx.notify();
+    }
+
     /// An extension registered or changed languages: switch this file's language if needed.
     pub fn redetect_language(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.path.clone() else { return };

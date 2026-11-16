@@ -71,6 +71,20 @@ impl TextInput {
         cx.notify();
     }
 
+    /// Select `range` (byte offsets, clamped to the text and to char boundaries).
+    pub fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        let clamp = |mut i: usize| {
+            i = i.min(self.content.len());
+            while !self.content.is_char_boundary(i) {
+                i -= 1;
+            }
+            i
+        };
+        self.selected_range = clamp(range.start)..clamp(range.end.max(range.start));
+        self.selection_reversed = false;
+        cx.notify();
+    }
+
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);

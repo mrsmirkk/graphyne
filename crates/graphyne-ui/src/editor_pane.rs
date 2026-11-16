@@ -11,6 +11,7 @@ use crate::theme::{self, c, color, color_a};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, SharedString, Subscription, Task, Window, div, px};
 use graphyne_core::session::{TabKind, TabState};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
@@ -72,6 +73,9 @@ pub struct EditorPane {
     tab_list_open: bool,
     /// When the list was closed by a click outside it (that click mustn't reopen it).
     tab_list_closed_at: Option<std::time::Instant>,
+    /// Files being loaded → whether to focus them when they open (a double click in the
+    /// tree arrives while the single click's load is still running: no second tab).
+    opening: HashMap<PathBuf, bool>,
 }
 
 /// What a tab shows: icon kind, title, full path for the tooltip / list, unsaved changes.
@@ -114,6 +118,7 @@ impl EditorPane {
             scrolled_to: None,
             tab_list_open: false,
             tab_list_closed_at: None,
+            opening: HashMap::new(),
         }
     }
 
@@ -214,22 +219,34 @@ impl EditorPane {
 
     /// Open (or activate) a file; `at` = (row, col) to reveal.
     pub fn open(&mut self, path: PathBuf, at: Option<(usize, usize)>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_with_focus(path, at, true, window, cx);
+    }
+
+    /// [`Self::open`]; with `focus` false the keyboard stays where it is (a single click in
+    /// the project tree previews the file, so F2 / Delete still go to the tree).
+    pub fn open_with_focus(&mut self, path: PathBuf, at: Option<(usize, usize)>, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
         let canonical = dunce_like(&path);
         if let Some(ix) = self.items.iter().position(|i| i.path(cx).as_deref().map(dunce_like) == Some(canonical.clone())) {
             self.active = ix;
             if let (Some((row, col)), PaneItem::Editor(e)) = (at, &self.items[ix]) {
                 e.update(cx, |e, cx| e.go_to(row, col, window, cx));
-            } else {
+            } else if focus {
                 self.focus_active(window, cx);
             }
             cx.emit(PaneEvent::Changed);
             cx.notify();
             return;
         }
+        if let Some(pending) = self.opening.get_mut(&canonical) {
+            *pending |= focus;
+            return;
+        }
+        self.opening.insert(canonical.clone(), focus);
         cx.spawn_in(window, async move |this, cx| {
             let p = path.clone();
             let loaded = cx.background_spawn(async move { load_file(&p) }).await;
             this.update_in(cx, |this, window, cx| {
+                let focus = this.opening.remove(&canonical).unwrap_or(true);
                 match loaded {
                     Ok(Some(buffer)) => {
                         let editor = this.new_editor(path.clone(), buffer, cx);
@@ -240,7 +257,8 @@ impl EditorPane {
                         }
                         match at {
                             Some((row, col)) => editor.update(cx, |e, cx| e.go_to(row, col, window, cx)),
-                            None => window.focus(&editor.focus_handle(cx)),
+                            None if focus => window.focus(&editor.focus_handle(cx)),
+                            None => {}
                         }
                     }
                     Ok(None) => {
@@ -250,7 +268,9 @@ impl EditorPane {
                         if this.items.len() == 1 {
                             this.active = 0;
                         }
-                        window.focus(&hex.focus_handle(cx));
+                        if focus {
+                            window.focus(&hex.focus_handle(cx));
+                        }
                     }
                     Err(err) => this.error = Some(format!("{err:#}")),
                 }
@@ -368,6 +388,64 @@ impl EditorPane {
         if self.active > ix || self.active >= self.items.len() {
             self.active = self.active.saturating_sub(1);
         }
+        self.focus_active(window, cx);
+        cx.emit(PaneEvent::Changed);
+        cx.notify();
+    }
+
+    /// A file or folder was renamed / moved on disk: tabs of it (or of files inside it) follow.
+    pub fn paths_moved(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) {
+        for item in &self.items {
+            match item {
+                PaneItem::Editor(e) => {
+                    if let Some(new) = e.read(cx).path.as_deref().and_then(|p| moved_path(p, from, to)) {
+                        e.update(cx, |e, cx| e.set_path(new, cx));
+                    }
+                }
+                PaneItem::Hex(h) => {
+                    if let Some(new) = moved_path(&h.read(cx).path, from, to) {
+                        h.update(cx, |h, cx| {
+                            h.path = new;
+                            cx.notify();
+                        });
+                    }
+                }
+                PaneItem::Diff(d) => {
+                    if let Some(new) = moved_path(&d.read(cx).path, from, to) {
+                        d.update(cx, |d, cx| {
+                            d.path = new;
+                            cx.notify();
+                        });
+                    }
+                }
+                PaneItem::Plugins(_) | PaneItem::Settings(_) => {}
+            }
+        }
+        cx.emit(PaneEvent::Changed);
+        cx.notify();
+    }
+
+    /// A file or folder went to the Recycle Bin: close its tabs (and those of files inside
+    /// it) without saving — saving would bring the file back.
+    pub fn paths_deleted(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let before = self.items.len();
+        let active = self.items.get(self.active).map(|i| i.focus_handle(cx));
+        self.items.retain(|item| {
+            let p = match item {
+                PaneItem::Editor(e) => e.read(cx).path.clone(),
+                PaneItem::Hex(h) => Some(h.read(cx).path.clone()),
+                PaneItem::Diff(d) => Some(d.read(cx).path.clone()),
+                PaneItem::Plugins(_) | PaneItem::Settings(_) => None,
+            };
+            !p.is_some_and(|p| moved_path(&p, path, path).is_some())
+        });
+        if self.items.len() == before {
+            return;
+        }
+        // Keep the same tab active when it survived, else the one now at its place.
+        self.active = active
+            .and_then(|f| self.items.iter().position(|i| i.focus_handle(cx) == f))
+            .unwrap_or(self.active.min(self.items.len().saturating_sub(1)));
         self.focus_active(window, cx);
         cx.emit(PaneEvent::Changed);
         cx.notify();
@@ -567,6 +645,24 @@ fn dunce_like(p: &Path) -> PathBuf {
     PathBuf::from(p.to_string_lossy().replace('/', std::path::MAIN_SEPARATOR_STR))
 }
 
+/// Where `p` is after `from` moved to `to` (`p` is `from` or inside it); `None` if unaffected.
+/// Letter case is ignored, as Windows does.
+fn moved_path(p: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
+    let key = |p: &Path| dunce_like(p).to_string_lossy().to_lowercase();
+    let (pk, fk) = (key(p), key(from));
+    let fk = fk.trim_end_matches(std::path::MAIN_SEPARATOR);
+    if pk == fk {
+        return Some(to.to_path_buf());
+    }
+    let rest = pk.strip_prefix(fk)?.strip_prefix(std::path::MAIN_SEPARATOR)?;
+    // Take the original-case tail from `p` (same length as the lowercased one only for
+    // ASCII; fall back to counting components).
+    let depth = Path::new(rest).components().count();
+    let comps: Vec<_> = p.components().collect();
+    let tail: PathBuf = comps[comps.len().saturating_sub(depth)..].iter().collect();
+    Some(to.join(tail))
+}
+
 /// A long file name with "…" in place of its end, keeping the extension:
 /// `Найти непересекающуюся п….py`.
 fn short_name(name: &str, max: usize) -> String {
@@ -748,7 +844,8 @@ fn load_file(path: &Path) -> anyhow::Result<Option<graphyne_core::Buffer>> {
 
 #[cfg(test)]
 mod tests {
-    use super::short_name;
+    use super::{moved_path, short_name};
+    use std::path::PathBuf;
 
     #[test]
     fn long_tab_names_keep_their_extension() {
@@ -756,5 +853,21 @@ mod tests {
         let s = short_name("Найти непересекающуюся пару с наибольшей суммой.py", 30);
         assert!(s.ends_with("….py") && s.chars().count() <= 30, "{s}");
         assert_eq!(short_name("longest_common_subsequence_without_extension", 20).chars().count(), 20);
+    }
+
+    #[test]
+    fn tabs_follow_renamed_paths() {
+        let p = PathBuf::from;
+        let (src, lib) = (p(r"C:\proj\src"), p(r"C:\proj\lib"));
+        // The file itself.
+        assert_eq!(moved_path(&p(r"C:\proj\src\a.py"), &p(r"C:\proj\src\a.py"), &p(r"C:\proj\src\b.py")), Some(p(r"C:\proj\src\b.py")));
+        // A file inside the renamed folder keeps the case of its own name.
+        assert_eq!(moved_path(&p(r"C:\proj\src\app\User.py"), &src, &lib), Some(p(r"C:\proj\lib\app\User.py")));
+        // Windows paths: another letter case or forward slashes are the same file.
+        assert_eq!(moved_path(&p(r"c:\Proj\SRC\a.py"), &src, &lib), Some(p(r"C:\proj\lib\a.py")));
+        assert_eq!(moved_path(&p("C:/proj/src/a.py"), &src, &lib), Some(p(r"C:\proj\lib\a.py")));
+        // A sibling whose name only starts the same is not inside the folder.
+        assert_eq!(moved_path(&p(r"C:\proj\src2\a.py"), &src, &lib), None);
+        assert_eq!(moved_path(&p(r"C:\proj\main.py"), &src, &lib), None);
     }
 }

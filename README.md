@@ -119,6 +119,11 @@ single portable `.exe`.
 - Change markers in the gutter, with a popup to view or roll back a change.
 
 ### Navigation and workspace
+- **File operations in the project tree**: right-click for New File, New Folder, Rename, Delete,
+  Copy Path / Copy Relative Path and Reveal in File Explorer. Names are typed right in the tree
+  (`src/utils/io.py` creates the folders too), `F2` renames, `Delete` moves to the **Recycle Bin**
+  after a confirmation, and open tabs follow renamed files and folders. A single click previews a
+  file and keeps the keyboard in the tree; a double click moves it to the editor.
 - **Search Everywhere** (`Shift Shift` / `Ctrl+K`) for files, symbols and actions; **Find in
   Files** (`Ctrl+Shift+F`).
 - **External Libraries**: the standard library and dependencies (Cargo, Python `site-packages`)
@@ -141,7 +146,8 @@ single portable `.exe`.
 
 Planned, roughly in this order:
 
-- [ ] **File operations in the project tree** — new file / folder, rename, delete, drag and drop.
+- [ ] **Drag and drop in the project tree** — move files and folders with the mouse (new file /
+      folder, rename and delete are done).
 - [ ] **Databases** — connections to PostgreSQL, MySQL and SQLite, a schema browser and a
       virtualized **DataGrid** for query results.
 - [ ] **Keymap editor** in Settings.
@@ -177,6 +183,7 @@ tells you when something is missing.
 | Search Everywhere | `Shift Shift`, `Ctrl+K` |
 | All actions | `Ctrl+Shift+O` |
 | Find in Files | `Ctrl+Shift+F` |
+| Project tree: rename / delete to the Recycle Bin | `F2` / `Delete` |
 | Settings | `Ctrl+,` |
 | Run current file | `Shift+F10` (or `Ctrl+R`) |
 | Debug / continue / step over / into / out / stop | `Shift+F9` / `F9` / `F8` / `F7` / `Shift+F8` / `Ctrl+F2` |

@@ -182,6 +182,27 @@ impl Workspace {
         let mut subs = Vec::new();
         subs.push(cx.subscribe_in(&file_tree, window, |this, _, ev, window, cx| match ev {
             FileTreeEvent::OpenFile(path) => this.open_file(path.clone(), None, window, cx),
+            FileTreeEvent::PreviewFile(path) => {
+                if path.exists() {
+                    let path = path.clone();
+                    this.pane.update(cx, |p, cx| p.open_with_focus(path, None, false, window, cx));
+                }
+            }
+            FileTreeEvent::Renamed(from, to) => {
+                let (from, to) = (from.clone(), to.clone());
+                this.pane.update(cx, |p, cx| p.paths_moved(&from, &to, cx));
+                this.git.update(cx, |g, cx| g.refresh(cx));
+            }
+            FileTreeEvent::Deleted(path) => {
+                let path = path.clone();
+                this.pane.update(cx, |p, cx| p.paths_deleted(&path, window, cx));
+                this.git.update(cx, |g, cx| g.refresh(cx));
+            }
+            FileTreeEvent::Error(text) => {
+                this.notify_user(text.clone(), true, cx);
+                this.show_notifications = true;
+                this.unread = false;
+            }
         }));
         let panel_handler = |this: &mut Self, ev: &PanelEvent, window: &mut Window, cx: &mut Context<Self>| match ev {
             PanelEvent::OpenFileAt(path, line, col) => this.open_file(path.clone(), Some((*line, *col)), window, cx),
