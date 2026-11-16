@@ -73,7 +73,7 @@ $notices.Add("Dependencies of the Windows build, including build-time crates (pr
 $notices.Add("Licence texts are available in each crate's source on https://crates.io.")
 $notices.Add("MPL-2.0 components (nucleo, nucleo-matcher, option-ext) are used unmodified; their source code")
 $notices.Add("is available at https://crates.io and in their upstream repositories.")
-$notices.Add("gpui (Apache-2.0, Zed Industries) is used with small local changes to its Windows start-up code;")
+$notices.Add("gpui (Apache-2.0, Zed Industries) is used with small local changes to its Windows platform code;")
 $notices.Add("they are listed in third_party/gpui/GRAPHYNE-CHANGES.md of the Graphyne sources.")
 $notices.Add("")
 $crates = cargo tree -p graphyne -e normal,build --target x86_64-pc-windows-msvc --prefix none --format "{p}|{l}" |
