@@ -9,8 +9,7 @@ use crate::plugins_page::PluginsPage;
 use crate::settings_page::SettingsPage;
 use crate::theme::{self, c, color, color_a};
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Task, Window, div, px};
-use graphyne_core::LanguageId;
+use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, SharedString, Subscription, Task, Window, div, px};
 use graphyne_core::session::{TabKind, TabState};
 use std::path::{Path, PathBuf};
 
@@ -65,6 +64,30 @@ pub struct EditorPane {
     pub hunk_excluded: HunkSelection,
     subs: Vec<Subscription>,
     pub error: Option<String>,
+    /// The tab strip scrolls sideways when the tabs don't fit.
+    tab_scroll: ScrollHandle,
+    /// (active tab, tab count) last scrolled into view.
+    scrolled_to: Option<(usize, usize)>,
+    /// The list of all open tabs (the `▾` at the right of the tab strip).
+    tab_list_open: bool,
+    /// When the list was closed by a click outside it (that click mustn't reopen it).
+    tab_list_closed_at: Option<std::time::Instant>,
+}
+
+/// What a tab shows: icon kind, title, full path for the tooltip / list, unsaved changes.
+struct TabInfo {
+    title: String,
+    kind: TabIcon,
+    path: Option<PathBuf>,
+    dirty: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum TabIcon {
+    File,
+    Diff,
+    Plugins,
+    Settings,
 }
 
 impl EventEmitter<PaneEvent> for EditorPane {}
@@ -77,7 +100,21 @@ impl Focusable for EditorPane {
 
 impl EditorPane {
     pub fn new(root: PathBuf, lsp_store: Entity<crate::lsp_store::LspStore>, cx: &mut Context<Self>) -> Self {
-        Self { focus_handle: cx.focus_handle(), items: Vec::new(), active: 0, root, lsp_store, debugger: None, hunk_excluded: HunkSelection::default(), subs: Vec::new(), error: None }
+        Self {
+            focus_handle: cx.focus_handle(),
+            items: Vec::new(),
+            active: 0,
+            root,
+            lsp_store,
+            debugger: None,
+            hunk_excluded: HunkSelection::default(),
+            subs: Vec::new(),
+            error: None,
+            tab_scroll: ScrollHandle::new(),
+            scrolled_to: None,
+            tab_list_open: false,
+            tab_list_closed_at: None,
+        }
     }
 
     /// The open editor for `path`, if any.
@@ -356,6 +393,136 @@ impl EditorPane {
         editors.into_iter().filter_map(|e| e.update(cx, |e, cx| e.save(cx))).collect()
     }
 
+    fn tab_info(&self, item: &PaneItem, cx: &App) -> TabInfo {
+        match item {
+            PaneItem::Editor(e) => {
+                let e = e.read(cx);
+                TabInfo { title: e.title(), kind: TabIcon::File, path: e.path.clone(), dirty: e.is_dirty() }
+            }
+            PaneItem::Hex(h) => {
+                let h = h.read(cx);
+                TabInfo { title: h.title(), kind: TabIcon::File, path: Some(h.path.clone()), dirty: false }
+            }
+            PaneItem::Diff(d) => {
+                let d = d.read(cx);
+                TabInfo { title: d.title().to_string(), kind: TabIcon::Diff, path: Some(d.path.clone()), dirty: false }
+            }
+            PaneItem::Plugins(_) => TabInfo { title: "Plugins".into(), kind: TabIcon::Plugins, path: None, dirty: false },
+            PaneItem::Settings(_) => TabInfo { title: "Settings".into(), kind: TabIcon::Settings, path: None, dirty: false },
+        }
+    }
+
+    /// A path for people: relative to the project when inside it.
+    fn display_path(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root).map(|r| r.display().to_string()).unwrap_or_else(|_| path.display().to_string())
+    }
+
+    /// How many tabs are (partly) outside the visible strip, by the last layout.
+    fn hidden_tab_count(&self) -> usize {
+        let visible = self.tab_scroll.bounds();
+        if self.tab_scroll.max_offset().width <= px(0.5) || visible.size.width <= px(0.) {
+            return 0;
+        }
+        let offset = self.tab_scroll.offset().x;
+        (0..self.items.len())
+            .filter(|ix| {
+                self.tab_scroll
+                    .bounds_for_item(*ix)
+                    .is_some_and(|b| b.left() + offset < visible.left() - px(1.) || b.right() + offset > visible.right() + px(1.))
+            })
+            .count()
+    }
+
+    /// Every open tab with its folder; click to switch.
+    fn render_tab_list(&self, infos: &[TabInfo], cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let rows: Vec<_> = infos
+            .iter()
+            .enumerate()
+            .map(|(ix, info)| {
+                let is_active = ix == self.active;
+                let folder: SharedString = info
+                    .path
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .map(|d| self.display_path(d))
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or_default()
+                    .into();
+                let group = SharedString::from(format!("tab-list-{ix}"));
+                div()
+                    .id(("tab-list-item", ix))
+                    .group(group.clone())
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .h(px(30.))
+                    .px(px(8.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .when(is_active, |d| d.bg(color(c::TAB_ACTIVE)))
+                    .when(!is_active, |d| d.hover(|s| s.bg(color(c::HOVER))))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.active = ix;
+                        this.tab_list_open = false;
+                        this.focus_active(window, cx);
+                        cx.emit(PaneEvent::Changed);
+                        cx.notify();
+                    }))
+                    .child(tab_icon(info))
+                    .child(div().flex_1().min_w(px(0.)).whitespace_nowrap().overflow_hidden().text_color(color(c::TEXT)).child(short_name(&info.title, 44)))
+                    .child(div().flex_none().max_w(px(120.)).whitespace_nowrap().overflow_hidden().text_size(px(11.5)).text_color(color(c::TEXT_DIM)).child(short_name(&folder, 20)))
+                    .when(info.dirty, |d| d.child(div().flex_none().size(px(6.)).rounded_full().bg(color(c::TEXT_MUTED))))
+                    .child(
+                        div()
+                            .id(("tab-list-close", ix))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .size(px(18.))
+                            .rounded(px(4.))
+                            .invisible()
+                            .group_hover(group, |s| s.visible())
+                            .hover(|s| s.bg(color(c::PRESSED)))
+                            .child(icon(Icon::Close, 11., color(c::TEXT_DIM)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close(ix, window, cx);
+                                if this.items.is_empty() {
+                                    this.tab_list_open = false;
+                                }
+                            })),
+                    )
+            })
+            .collect();
+        div()
+            .id("tab-list")
+            .occlude()
+            .absolute()
+            .top(px(theme::ISLAND_HEADER_HEIGHT - 2.))
+            .right(px(6.))
+            .w(px(460.))
+            .max_h(px(460.))
+            .overflow_y_scroll()
+            .p(px(6.))
+            .flex()
+            .flex_col()
+            .gap(px(1.))
+            .rounded(px(10.))
+            .bg(color(c::POPUP))
+            .border_1()
+            .border_color(color(c::POPUP_BORDER))
+            .shadow_lg()
+            .text_size(px(theme::UI_TEXT))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.tab_list_open = false;
+                this.tab_list_closed_at = Some(std::time::Instant::now());
+                cx.notify();
+            }))
+            .child(div().px(px(8.)).pt(px(2.)).pb(px(4.)).text_size(px(11.)).text_color(color(c::TEXT_FAINT)).child(format!("OPEN TABS  {}", infos.len())))
+            .children(rows)
+    }
+
     fn render_problems(&self, cx: &App) -> Option<gpui::AnyElement> {
         let PaneItem::Editor(editor) = self.items.get(self.active)? else { return None };
         let (errors, warnings) = editor.read(cx).problem_count();
@@ -400,6 +567,27 @@ fn dunce_like(p: &Path) -> PathBuf {
     PathBuf::from(p.to_string_lossy().replace('/', std::path::MAIN_SEPARATOR_STR))
 }
 
+/// A long file name with "…" in place of its end, keeping the extension:
+/// `Найти непересекающуюся п….py`.
+fn short_name(name: &str, max: usize) -> String {
+    let count = name.chars().count();
+    if count <= max {
+        return name.to_string();
+    }
+    let ext = name.rfind('.').filter(|&i| i > 0 && name.len() - i <= 8).map(|i| &name[i..]).unwrap_or("");
+    let keep = max.saturating_sub(ext.chars().count() + 1).max(4);
+    let head: String = name.chars().take(keep).collect();
+    format!("{}…{ext}", head.trim_end())
+}
+
+fn tab_icon(info: &TabInfo) -> gpui::AnyElement {
+    match info.kind {
+        TabIcon::Plugins => icon(Icon::Puzzle, 14., color(c::ACCENT)).into_any_element(),
+        TabIcon::Settings => icon(Icon::Settings, 14., color(c::ACCENT)).into_any_element(),
+        TabIcon::File | TabIcon::Diff => crate::file_icons::file_icon(Path::new(&info.title)).into_any_element(),
+    }
+}
+
 fn empty_state() -> impl IntoElement {
     let row = |label: &'static str, keys: &[&'static str]| {
         div()
@@ -431,23 +619,18 @@ fn empty_state() -> impl IntoElement {
 impl Render for EditorPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let island_focused = self.items.get(self.active).is_some_and(|i| i.focus_handle(cx).contains_focused(window, cx));
-        let mut header = island_header().id("editor-tabs").overflow_x_scroll();
-        for (ix, item) in self.items.iter().enumerate() {
+        let infos: Vec<TabInfo> = self.items.iter().map(|item| self.tab_info(item, cx)).collect();
+        // A newly active / opened / closed tab is scrolled into view.
+        if self.scrolled_to != Some((self.active, self.items.len())) {
+            self.scrolled_to = Some((self.active, self.items.len()));
+            self.tab_scroll.scroll_to_item(self.active);
+        }
+        let mut strip = div().id("editor-tab-strip").flex().flex_1().min_w(px(0.)).items_center().gap(px(2.)).overflow_x_scroll().track_scroll(&self.tab_scroll);
+        for (ix, info) in infos.iter().enumerate() {
             let is_active = ix == self.active;
-            let (title, _lang, dirty) = match item {
-                PaneItem::Editor(e) => {
-                    let e = e.read(cx);
-                    (e.title(), e.language, e.is_dirty())
-                }
-                PaneItem::Hex(h) => (h.read(cx).title(), LanguageId::PlainText, false),
-                PaneItem::Diff(d) => (d.read(cx).title().to_string(), LanguageId::PlainText, false),
-                PaneItem::Plugins(_) => ("Plugins".to_string(), LanguageId::PlainText, false),
-                PaneItem::Settings(_) => ("Settings".to_string(), LanguageId::PlainText, false),
-            };
-            let is_diff = matches!(item, PaneItem::Diff(_));
-            let is_plugins = matches!(item, PaneItem::Plugins(_));
-            let is_settings = matches!(item, PaneItem::Settings(_));
-            header = header.child(
+            let dirty = info.dirty;
+            let tip = info.path.as_ref().map(|p| self.display_path(p));
+            strip = strip.child(
                 div()
                     .id(("tab", ix))
                     .group(gpui::SharedString::from(format!("tab-{ix}")))
@@ -466,6 +649,7 @@ impl Render for EditorPane {
                     .when(is_active && island_focused, |d| d.bg(color(c::TAB_FOCUSED)).border_color(color(c::TAB_FOCUSED_BORDER)).text_color(color(c::TEXT)))
                     .when(is_active && !island_focused, |d| d.bg(color(c::TAB_ACTIVE)).text_color(color(c::TEXT)))
                     .when(!is_active, |d| d.text_color(color(c::TEXT_MUTED)).hover(|s| s.bg(color(c::HOVER)).text_color(color(c::TEXT))))
+                    .when_some(tip, |d, tip| d.tooltip(tooltip(tip, None)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.active = ix;
                         this.focus_active(window, cx);
@@ -473,11 +657,10 @@ impl Render for EditorPane {
                         cx.notify();
                     }))
                     .on_mouse_down(gpui::MouseButton::Middle, cx.listener(move |this, _, window, cx| this.close(ix, window, cx)))
-                    .when(is_plugins, |d| d.child(icon(Icon::Puzzle, 14., color(c::ACCENT))))
-                    .when(is_settings, |d| d.child(icon(Icon::Settings, 14., color(c::ACCENT))))
-                    .when(!is_plugins && !is_settings, |d| d.child(crate::file_icons::file_icon(Path::new(&title))))
-                    .child(title)
-                    .when(is_diff, |d| {
+                    .child(tab_icon(info))
+                    // Long names are shortened with "…" (extension kept); the tooltip has the full path.
+                    .child(div().max_w(px(280.)).whitespace_nowrap().overflow_hidden().child(short_name(&info.title, 30)))
+                    .when(info.kind == TabIcon::Diff, |d| {
                         d.child(div().px(px(4.)).rounded(px(3.)).bg(color_a(c::GIT_MODIFIED, 0.18)).text_size(px(10.5)).text_color(color(c::GIT_MODIFIED)).child("diff"))
                     })
                     .child(
@@ -504,6 +687,35 @@ impl Render for EditorPane {
                     ),
             );
         }
+        // Tabs that don't fit (from the last layout): the `▾ N` button lists every tab.
+        let hidden = self.hidden_tab_count();
+        let list_button = (hidden > 0 || self.tab_list_open).then(|| {
+            div()
+                .id("tab-list-button")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(3.))
+                .h(px(26.))
+                .px(px(6.))
+                .ml(px(2.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(theme::UI_SMALL))
+                .text_color(color(c::TEXT_MUTED))
+                .when(self.tab_list_open, |d| d.bg(color(c::HOVER)).text_color(color(c::TEXT)))
+                .hover(|s| s.bg(color(c::HOVER)).text_color(color(c::TEXT)))
+                .tooltip(tooltip("All open tabs", None))
+                .child(icon(Icon::ChevronDown, 13., color(c::TEXT_MUTED)))
+                .when(hidden > 0, |d| d.child(hidden.to_string()))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let just_closed = this.tab_list_closed_at.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(250));
+                    this.tab_list_open = !this.tab_list_open && !just_closed;
+                    cx.notify();
+                }))
+        });
+        let tab_list = self.tab_list_open.then(|| self.render_tab_list(&infos, cx));
+        let header = island_header().child(strip).children(list_button);
         let body: gpui::AnyElement = match self.items.get(self.active) {
             Some(PaneItem::Editor(e)) => e.clone().into_any_element(),
             Some(PaneItem::Hex(h)) => h.clone().into_any_element(),
@@ -516,9 +728,11 @@ impl Render for EditorPane {
         island()
             .track_focus(&self.focus_handle)
             .size_full()
+            .relative()
             .font_family(theme::fonts().ui)
             .child(header)
             .child(div().flex_1().min_h(px(0.)).relative().child(body).children(problems))
+            .children(tab_list)
     }
 }
 
@@ -530,4 +744,17 @@ fn load_file(path: &Path) -> anyhow::Result<Option<graphyne_core::Buffer>> {
     }
     let file = std::fs::File::open(path)?;
     Ok(Some(graphyne_core::Buffer::from_reader(std::io::BufReader::with_capacity(1 << 20, file))?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_name;
+
+    #[test]
+    fn long_tab_names_keep_their_extension() {
+        assert_eq!(short_name("parser.py", 30), "parser.py");
+        let s = short_name("Найти непересекающуюся пару с наибольшей суммой.py", 30);
+        assert!(s.ends_with("….py") && s.chars().count() <= 30, "{s}");
+        assert_eq!(short_name("longest_common_subsequence_without_extension", 20).chars().count(), 20);
+    }
 }
