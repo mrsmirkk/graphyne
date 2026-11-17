@@ -1,0 +1,13 @@
+[package]
+name = "graphyne-db"
+description = "Graphyne databases: connections, schema browsing, SQL execution (SQLite built in)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+flume.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true

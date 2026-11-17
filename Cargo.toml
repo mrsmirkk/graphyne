@@ -10,6 +10,7 @@ members = [
     "crates/graphyne-dap",
     "crates/graphyne-ui",
     "crates/graphyne-lua",
+    "crates/graphyne-db",
 ]
 default-members = ["crates/graphyne"]
 
@@ -28,6 +29,7 @@ graphyne-lsp = { path = "crates/graphyne-lsp" }
 graphyne-dap = { path = "crates/graphyne-dap" }
 graphyne-ui = { path = "crates/graphyne-ui" }
 graphyne-lua = { path = "crates/graphyne-lua" }
+graphyne-db = { path = "crates/graphyne-db" }
 
 gpui = "0.2.2"
 anyhow = "1"
@@ -43,6 +45,8 @@ lsp-types = "0.97"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 trash = "5"
+# SQLite compiled in: Database panel works without installing anything.
+rusqlite = { version = "0.43", features = ["bundled"] }
 memmap2 = "0.9"
 dirs = "6"
 regex = "1"

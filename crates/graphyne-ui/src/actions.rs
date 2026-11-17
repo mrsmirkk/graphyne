@@ -215,6 +215,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", editor::Escape, ed),
         KeyBinding::new(&m("mod-space"), editor::ShowCompletions, ed),
         KeyBinding::new(&m("mod-s"), editor::Save, ed),
+        // SQL console
+        KeyBinding::new(&m("mod-enter"), crate::database::RunStatement, Some("DbConsole")),
         // Text inputs
         KeyBinding::new("backspace", input::Backspace, ti),
         KeyBinding::new("delete", input::Delete, ti),

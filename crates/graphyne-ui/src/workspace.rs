@@ -9,6 +9,7 @@
 use crate::actions::*;
 use crate::assets::Icon;
 use crate::components::{header_tab, icon, icon_button, island, island_header, small_icon_button, tooltip, vsep};
+use crate::database::{DatabasePanel, DbPanelEvent, DbStore};
 use crate::editor_pane::{EditorPane, PaneEvent, PaneItem};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::panels::{FindPanel, GitPanel, HistoryPanel, PanelEvent};
@@ -55,6 +56,7 @@ enum LeftTab {
 enum RightTab {
     Structure,
     Secrets,
+    Database,
     Plugin(u64),
 }
 
@@ -107,6 +109,8 @@ pub struct Workspace {
     left_tab: LeftTab,
     right_tab: RightTab,
     file_tree: Entity<FileTree>,
+    db_store: Entity<DbStore>,
+    db_panel: Entity<DatabasePanel>,
     find: Entity<FindPanel>,
     git: Entity<GitPanel>,
     history: Entity<HistoryPanel>,
@@ -178,12 +182,33 @@ impl Workspace {
         let hunk_excluded = crate::diff_view::HunkSelection::default();
         git.update(cx, |g, _| g.hunk_excluded = hunk_excluded.clone());
         pane.update(cx, |p, _| p.hunk_excluded = hunk_excluded);
+        let db_store = cx.new(|_| DbStore::new(root.clone()));
+        let db_panel = cx.new(|cx| DatabasePanel::new(db_store.clone(), cx));
+        pane.update(cx, |p, _| p.db = Some(db_store.clone()));
         debugger.update(cx, |d, cx| d.load(cx));
         let terminal = cx.new(|cx| TerminalPanel::new(root.clone(), cx));
 
         let mut subs = Vec::new();
+        subs.push(cx.subscribe_in(&db_panel, window, |this, _, ev, window, cx| match ev {
+            DbPanelEvent::OpenTable(db, table) => {
+                let (db, table) = (db.clone(), table.clone());
+                this.pane.update(cx, |p, cx| p.open_db_table(db, table, window, cx));
+            }
+            DbPanelEvent::OpenConsole(db, sql) => {
+                let (db, sql) = (db.clone(), sql.clone());
+                this.pane.update(cx, |p, cx| p.open_db_console(db, sql, window, cx));
+            }
+            DbPanelEvent::Notify(text, error) => {
+                this.notify_user(text.clone(), *error, cx);
+                if *error {
+                    this.show_notifications = true;
+                    this.unread = false;
+                }
+            }
+        }));
         subs.push(cx.subscribe_in(&file_tree, window, |this, _, ev, window, cx| match ev {
             FileTreeEvent::OpenFile(path) => this.open_file(path.clone(), None, window, cx),
+            FileTreeEvent::PreviewFile(path) if graphyne_db::is_sqlite_file(path) => this.open_database_file(path.clone(), cx),
             FileTreeEvent::PreviewFile(path) => {
                 if path.exists() {
                     let path = path.clone();
@@ -299,6 +324,8 @@ impl Workspace {
             left_tab: LeftTab::Files,
             right_tab: RightTab::Structure,
             file_tree,
+            db_store,
+            db_panel,
             find,
             git,
             history,
@@ -383,6 +410,7 @@ impl Workspace {
         };
         self.right_tab = match s.right_tab.as_str() {
             "secrets" => RightTab::Secrets,
+            "database" => RightTab::Database,
             t => plugin_tab(t).map(RightTab::Plugin).unwrap_or(RightTab::Structure),
         };
         self.left_width = px(s.left_width.clamp(160., 1200.));
@@ -421,6 +449,7 @@ impl Workspace {
             right_tab: match self.right_tab {
                 RightTab::Structure => "structure".into(),
                 RightTab::Secrets => "secrets".into(),
+                RightTab::Database => "database".into(),
                 RightTab::Plugin(id) => format!("plugin:{id}"),
             },
             left_width: f32::from(self.left_width),
@@ -953,8 +982,26 @@ impl Workspace {
             self.notify_user(format!("File not found: {}", path.display()), true, cx);
             return;
         }
+        if at.is_none() && graphyne_db::is_sqlite_file(&path) {
+            return self.open_database_file(path, cx);
+        }
         self.file_tree.update(cx, |t, cx| t.reveal(&path, cx));
         self.pane.update(cx, |p, cx| p.open(path, at, window, cx));
+    }
+
+    /// An SQLite file opened from the tree or a dialog: it goes to the Database panel (added
+    /// as a connection once) instead of the hex viewer.
+    fn open_database_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.file_tree.update(cx, |t, cx| t.reveal(&path, cx));
+        let id = self.db_store.update(cx, |s, cx| s.add_sqlite(&path, cx));
+        self.db_panel.update(cx, |p, cx| p.reveal(&id, cx));
+        self.show_database_panel(cx);
+    }
+
+    fn show_database_panel(&mut self, cx: &mut Context<Self>) {
+        self.right = true;
+        self.right_tab = RightTab::Database;
+        cx.notify();
     }
 
     // ---------------------------------------------------------------- actions
@@ -1220,6 +1267,15 @@ impl Workspace {
             IdeAction::OpenFile => self.open_file_action(&OpenFile, window, cx),
             IdeAction::SaveAs => self.save_as(&SaveAs, window, cx),
             IdeAction::CloseAllTabs => self.close_all_tabs(&CloseAllTabs, window, cx),
+            IdeAction::DatabasePanel => self.show_database_panel(cx),
+            IdeAction::AddDatabase => {
+                self.show_database_panel(cx);
+                self.db_panel.update(cx, |p, cx| p.add_existing(cx));
+            }
+            IdeAction::NewDatabase => {
+                self.show_database_panel(cx);
+                self.db_panel.update(cx, |p, cx| p.create_new(cx));
+            }
             IdeAction::GitPanel => {
                 self.left = true;
                 self.left_tab = LeftTab::Git;
@@ -1705,7 +1761,7 @@ impl Workspace {
         let tab = self.right_tab;
         let editor = self.pane.read(cx).active_editor();
         let mut header = island_header();
-        for (t, label) in [(RightTab::Structure, "Structure"), (RightTab::Secrets, "Secrets Guard")] {
+        for (t, label) in [(RightTab::Structure, "Structure"), (RightTab::Secrets, "Secrets Guard"), (RightTab::Database, "Database")] {
             header = header.child(header_tab(SharedString::from(format!("right-{label}")), label, t == tab, false).on_click(cx.listener(move |this, _, _, cx| {
                 this.right_tab = t;
                 cx.notify();
@@ -1721,6 +1777,7 @@ impl Workspace {
         }
         let body: AnyElement = match (tab, editor) {
             (RightTab::Plugin(id), _) => self.render_plugin_tab(id, cx),
+            (RightTab::Database, _) => self.db_panel.clone().into_any_element(),
             (_, None) => div().p(px(16.)).text_color(color(c::TEXT_DIM)).child("No file open").into_any_element(),
             (RightTab::Structure, Some(editor)) => {
                 let outline = editor.read(cx).outline.clone();
@@ -1900,6 +1957,17 @@ impl Workspace {
             }
             Some(PaneItem::Settings(_)) => {
                 crumbs.push("Settings".into());
+            }
+            Some(PaneItem::DbConsole(console)) => {
+                crumbs.push("Database".into());
+                crumbs.push(format!("{} console", console.read(cx).title(cx)).into());
+                right.push(div().child("SQL").into_any_element());
+            }
+            Some(PaneItem::DbTable(table)) => {
+                let t = table.read(cx);
+                crumbs.push("Database".into());
+                crumbs.push(self.db_store.read(cx).name(&t.db_id));
+                crumbs.push(t.table.clone().into());
             }
             Some(PaneItem::Diff(d)) => {
                 let d = d.read(cx);
@@ -2139,7 +2207,7 @@ impl Workspace {
                 let has_editor = self.pane.read(cx).active_editor().is_some();
                 let separator = || div().mx(px(6.)).my(px(4.)).h(px(1.)).bg(color(c::BORDER));
                 // Disabled entries stay visible (dimmed), so the menu doesn't change shape.
-                let mut action = |id: &'static str, label: &'static str, shortcut: Option<&'static str>, enabled: bool, act: Box<dyn gpui::Action>| {
+                let action = |id: &'static str, label: &'static str, shortcut: Option<&'static str>, enabled: bool, act: Box<dyn gpui::Action>| {
                     let row = item(id, label.into(), None, shortcut);
                     if enabled {
                         row.on_click(cx.listener(move |this, _, window, cx| {

@@ -118,6 +118,18 @@ single portable `.exe`.
 - **Partial commits**: tick the blocks to include in the next commit.
 - Change markers in the gutter, with a popup to view or roll back a change.
 
+### Databases
+- A **Database** panel (right side): connections → tables and views → columns with types and
+  primary keys. **SQLite is built in** — nothing to install; opening a `.db` / `.sqlite` file from
+  the project tree adds it.
+- **SQL console** per connection: `Ctrl+Enter` runs the statement under the cursor or the
+  selection (scripts too), **Stop** cancels a long query, errors show with the failing statement.
+  The console text is kept between sessions.
+- **Data grid** for results and tables: virtualized (200,000 rows scroll smoothly), sort by a
+  column, resize columns, keyboard navigation, copy a cell; tables show the total row count.
+- Connections and consoles live in Graphyne's own state folder — nothing is written into the
+  project.
+
 ### Navigation and workspace
 - **File operations in the project tree**: right-click for New File, New Folder, Rename, Delete,
   Copy Path / Copy Relative Path and Reveal in File Explorer. Names are typed right in the tree
@@ -150,8 +162,8 @@ single portable `.exe`.
 
 Planned, roughly in this order:
 
-- [ ] **Databases** — connections to PostgreSQL, MySQL and SQLite, a schema browser and a
-      virtualized **DataGrid** for query results.
+- [ ] **Databases, next steps** — PostgreSQL and MySQL connections (SQLite, the schema browser,
+      the SQL console and the data grid are done), editing cells in the grid, exporting results.
 - [ ] **Keymap editor** in Settings.
 - [ ] **Debugging beyond Python** verified end to end: Rust / C / C++ (`lldb-dap`), Go (`delve`),
       JavaScript / TypeScript.
@@ -193,6 +205,7 @@ tells you when something is missing.
 | Toggle breakpoint / edit condition or logpoint | `Ctrl+F8` (or click the line number) / `Ctrl+Shift+F8` |
 | Go to definition / documentation / parameters | `Ctrl+B`, `F12` / `Ctrl+Q` / `Ctrl+P` |
 | Quick fixes | `Alt+Enter` |
+| SQL console: run statement / selection | `Ctrl+Enter` |
 | Extend / shrink selection | `Ctrl+W` / `Ctrl+Shift+W` |
 | Fold / unfold block (all: add `Shift`) | `Ctrl+-` / `Ctrl+=` |
 | Toggle comment, duplicate line, delete line | `Ctrl+/`, `Ctrl+D`, `Ctrl+Shift+K` |

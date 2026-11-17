@@ -4,6 +4,7 @@ mod actions;
 mod app_settings;
 mod assets;
 mod components;
+mod database;
 mod debug_panel;
 mod debugger;
 mod diff_view;

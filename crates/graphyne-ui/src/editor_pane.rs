@@ -2,6 +2,7 @@
 
 use crate::assets::Icon;
 use crate::components::{icon, island, island_header, kbd, tooltip};
+use crate::database::{DbConsole, DbStore, DbTableEvent, DbTableView};
 use crate::diff_view::{DiffEvent, DiffView, HunkSelection};
 use crate::editor::{Editor, EditorEvent};
 use crate::hex_view::HexView;
@@ -24,6 +25,10 @@ pub enum PaneItem {
     Plugins(Entity<PluginsPage>),
     /// Graphyne's own settings.
     Settings(Entity<SettingsPage>),
+    /// A database connection's SQL console.
+    DbConsole(Entity<DbConsole>),
+    /// The rows of a database table.
+    DbTable(Entity<DbTableView>),
 }
 
 impl PaneItem {
@@ -32,7 +37,7 @@ impl PaneItem {
             PaneItem::Editor(e) => e.read(cx).path.clone(),
             PaneItem::Hex(h) => Some(h.read(cx).path.clone()),
             // A diff tab never stands in for the file itself.
-            PaneItem::Diff(_) | PaneItem::Plugins(_) | PaneItem::Settings(_) => None,
+            PaneItem::Diff(_) | PaneItem::Plugins(_) | PaneItem::Settings(_) | PaneItem::DbConsole(_) | PaneItem::DbTable(_) => None,
         }
     }
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -42,6 +47,8 @@ impl PaneItem {
             PaneItem::Diff(d) => d.focus_handle(cx),
             PaneItem::Plugins(p) => p.focus_handle(cx),
             PaneItem::Settings(p) => p.focus_handle(cx),
+            PaneItem::DbConsole(c) => c.focus_handle(cx),
+            PaneItem::DbTable(t) => t.focus_handle(cx),
         }
     }
 }
@@ -76,6 +83,8 @@ pub struct EditorPane {
     /// Files being loaded → whether to focus them when they open (a double click in the
     /// tree arrives while the single click's load is still running: no second tab).
     opening: HashMap<PathBuf, bool>,
+    /// The project's database connections (console and table tabs use them).
+    pub db: Option<Entity<DbStore>>,
 }
 
 /// What a tab shows: icon kind, title, full path for the tooltip / list, unsaved changes.
@@ -92,6 +101,8 @@ enum TabIcon {
     Diff,
     Plugins,
     Settings,
+    Console,
+    Table,
 }
 
 impl EventEmitter<PaneEvent> for EditorPane {}
@@ -119,6 +130,7 @@ impl EditorPane {
             tab_list_open: false,
             tab_list_closed_at: None,
             opening: HashMap::new(),
+            db: None,
         }
     }
 
@@ -208,6 +220,99 @@ impl EditorPane {
         self.focus_active(window, cx);
         cx.emit(PaneEvent::Changed);
         cx.notify();
+    }
+
+    /// Open (or focus) the SQL console of connection `db_id`; `sql` is added as its last line.
+    pub fn open_db_console(&mut self, db_id: String, sql: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(store) = self.db.clone() else { return };
+        if let Some(ix) = self.items.iter().position(|i| matches!(i, PaneItem::DbConsole(c) if c.read(cx).db_id == db_id)) {
+            self.active = ix;
+            if let (Some(sql), PaneItem::DbConsole(console)) = (sql, &self.items[ix]) {
+                let editor = console.read(cx).editor.clone();
+                editor.update(cx, |e, cx| e.append_line(&sql, window, cx));
+            } else {
+                self.focus_active(window, cx);
+            }
+            cx.emit(PaneEvent::Changed);
+            cx.notify();
+            return;
+        }
+        let Some(path) = store.read(cx).console_file(&db_id) else { return };
+        let name = store.read(cx).name(&db_id);
+        cx.spawn_in(window, async move |this, cx| {
+            let file = path.clone();
+            let loaded = cx
+                .background_spawn(async move {
+                    if !file.exists() {
+                        if let Some(dir) = file.parent() {
+                            std::fs::create_dir_all(dir)?;
+                        }
+                        std::fs::write(&file, format!("-- {name}: Ctrl+Enter runs the statement under the cursor, or the selection.\n\n"))?;
+                    }
+                    load_file(&file)
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| match loaded {
+                Ok(Some(buffer)) => {
+                    let console = this.new_db_console(db_id, path, buffer, cx);
+                    let at = (this.active + 1).min(this.items.len());
+                    this.items.insert(at, PaneItem::DbConsole(console.clone()));
+                    this.active = at;
+                    let editor = console.read(cx).editor.clone();
+                    match sql {
+                        Some(sql) => editor.update(cx, |e, cx| e.append_line(&sql, window, cx)),
+                        None => {
+                            // Start below the last line, ready to type.
+                            let end = editor.read(cx).buffer.len_lines().saturating_sub(1);
+                            editor.update(cx, |e, cx| e.go_to(end, 0, window, cx));
+                        }
+                    }
+                    cx.emit(PaneEvent::Changed);
+                    cx.notify();
+                }
+                Ok(None) => this.error = Some(format!("{} is not a text file", path.display())),
+                Err(e) => this.error = Some(format!("{e:#}")),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn new_db_console(&mut self, db_id: String, path: PathBuf, buffer: graphyne_core::Buffer, cx: &mut Context<Self>) -> Entity<DbConsole> {
+        let store = self.db.clone().expect("database store");
+        // No language server for consoles: highlighting and word completion are enough here.
+        let editor = cx.new(|cx| Editor::new(Some(path), buffer, self.root.clone(), None, None, cx));
+        cx.new(|cx| DbConsole::new(db_id, store, editor, cx))
+    }
+
+    /// Open (or focus and refresh) the rows of `table` of connection `db_id`.
+    pub fn open_db_table(&mut self, db_id: String, table: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(store) = self.db.clone() else { return };
+        match self.items.iter().position(|i| matches!(i, PaneItem::DbTable(t) if t.read(cx).db_id == db_id && t.read(cx).table == table)) {
+            Some(ix) => {
+                self.active = ix;
+                if let PaneItem::DbTable(t) = &self.items[ix] {
+                    t.update(cx, |t, cx| t.load(cx));
+                }
+            }
+            None => {
+                let view = self.new_db_table(db_id, table, store, window, cx);
+                let at = (self.active + 1).min(self.items.len());
+                self.items.insert(at, PaneItem::DbTable(view));
+                self.active = at;
+            }
+        }
+        self.focus_active(window, cx);
+        cx.emit(PaneEvent::Changed);
+        cx.notify();
+    }
+
+    fn new_db_table(&mut self, db_id: String, table: String, store: Entity<DbStore>, window: &mut Window, cx: &mut Context<Self>) -> Entity<DbTableView> {
+        let view = cx.new(|cx| DbTableView::new(db_id, table, store, cx));
+        self.subs.push(cx.subscribe_in(&view, window, |this, _, ev: &DbTableEvent, window, cx| match ev {
+            DbTableEvent::OpenConsole(db, sql) => this.open_db_console(db.clone(), Some(sql.clone()), window, cx),
+        }));
+        view
     }
 
     pub fn diff_views(&self) -> impl Iterator<Item = &Entity<DiffView>> {
@@ -314,12 +419,22 @@ impl EditorPane {
                 PaneItem::Editor(e) => {
                     let e = e.read(cx);
                     let (cursor, anchor, scroll_line, scroll_x) = e.view_state();
-                    TabState { kind: TabKind::File, path: e.path.clone(), cursor, anchor, scroll_line, scroll_x, folds: e.folded_rows() }
+                    TabState { kind: TabKind::File, path: e.path.clone(), cursor, anchor, scroll_line, scroll_x, folds: e.folded_rows(), ..Default::default() }
                 }
                 PaneItem::Hex(h) => TabState { kind: TabKind::File, path: Some(h.read(cx).path.clone()), ..Default::default() },
                 PaneItem::Diff(d) => TabState { kind: TabKind::Diff, path: Some(d.read(cx).path.clone()), ..Default::default() },
                 PaneItem::Plugins(_) => TabState { kind: TabKind::Plugins, ..Default::default() },
                 PaneItem::Settings(_) => TabState { kind: TabKind::Settings, ..Default::default() },
+                PaneItem::DbConsole(c) => {
+                    let c = c.read(cx);
+                    let e = c.editor.read(cx);
+                    let (cursor, anchor, scroll_line, scroll_x) = e.view_state();
+                    TabState { kind: TabKind::DbConsole, path: e.path.clone(), cursor, anchor, scroll_line, scroll_x, db: Some(c.db_id.clone()), ..Default::default() }
+                }
+                PaneItem::DbTable(t) => {
+                    let t = t.read(cx);
+                    TabState { kind: TabKind::DbTable, db: Some(t.db_id.clone()), table: Some(t.table.clone()), ..Default::default() }
+                }
             })
             .collect();
         (tabs, self.active)
@@ -332,14 +447,27 @@ impl EditorPane {
             return;
         }
         cx.spawn_in(window, async move |this, cx| {
-            let paths: Vec<Option<PathBuf>> = tabs.iter().map(|t| t.path.clone().filter(|_| t.kind == TabKind::File)).collect();
+            let paths: Vec<Option<PathBuf>> = tabs.iter().map(|t| t.path.clone().filter(|_| matches!(t.kind, TabKind::File | TabKind::DbConsole))).collect();
             let loaded: Vec<Option<anyhow::Result<Option<graphyne_core::Buffer>>>> =
                 cx.background_spawn(async move { paths.into_iter().map(|p| p.filter(|p| p.is_file()).map(|p| load_file(&p))).collect() }).await;
             this.update_in(cx, |this, window, cx| {
                 let mut restored = Vec::new();
                 let mut new_active = 0;
                 for (ix, (tab, file)) in tabs.into_iter().zip(loaded).enumerate() {
+                    // Database tabs come back only while their connection still exists.
+                    let db = tab.db.clone().filter(|id| this.db.as_ref().is_some_and(|s| s.read(cx).entry(id).is_some()));
+                    let table = tab.table.clone();
                     let item = match (tab.kind, tab.path, file) {
+                        (TabKind::DbConsole, Some(path), Some(Ok(Some(buffer)))) if db.is_some() => {
+                            let console = this.new_db_console(db.unwrap_or_default(), path, buffer, cx);
+                            let editor = console.read(cx).editor.clone();
+                            editor.update(cx, |e, cx| e.restore_view(tab.cursor, tab.anchor, tab.scroll_line, tab.scroll_x, cx));
+                            PaneItem::DbConsole(console)
+                        }
+                        (TabKind::DbTable, _, _) if db.is_some() && table.is_some() => {
+                            let store = this.db.clone().expect("checked above");
+                            PaneItem::DbTable(this.new_db_table(db.unwrap_or_default(), table.unwrap_or_default(), store, window, cx))
+                        }
                         (TabKind::File, Some(path), Some(Ok(Some(buffer)))) => {
                             let editor = this.new_editor(path, buffer, cx);
                             editor.update(cx, |e, cx| {
@@ -379,10 +507,13 @@ impl EditorPane {
         if ix >= self.items.len() {
             return;
         }
-        if let PaneItem::Editor(e) = &self.items[ix] {
-            if let Some(task) = e.update(cx, |e, cx| e.save(cx)) {
-                task.detach();
-            }
+        let editor = match &self.items[ix] {
+            PaneItem::Editor(e) => Some(e.clone()),
+            PaneItem::DbConsole(c) => Some(c.read(cx).editor.clone()),
+            _ => None,
+        };
+        if let Some(task) = editor.and_then(|e| e.update(cx, |e, cx| e.save(cx))) {
+            task.detach();
         }
         self.items.remove(ix);
         if self.active > ix || self.active >= self.items.len() {
@@ -418,7 +549,7 @@ impl EditorPane {
                         });
                     }
                 }
-                PaneItem::Plugins(_) | PaneItem::Settings(_) => {}
+                PaneItem::Plugins(_) | PaneItem::Settings(_) | PaneItem::DbConsole(_) | PaneItem::DbTable(_) => {}
             }
         }
         cx.emit(PaneEvent::Changed);
@@ -435,7 +566,7 @@ impl EditorPane {
                 PaneItem::Editor(e) => e.read(cx).path.clone(),
                 PaneItem::Hex(h) => Some(h.read(cx).path.clone()),
                 PaneItem::Diff(d) => Some(d.read(cx).path.clone()),
-                PaneItem::Plugins(_) | PaneItem::Settings(_) => None,
+                PaneItem::Plugins(_) | PaneItem::Settings(_) | PaneItem::DbConsole(_) | PaneItem::DbTable(_) => None,
             };
             !p.is_some_and(|p| moved_path(&p, path, path).is_some())
         });
@@ -521,6 +652,8 @@ impl EditorPane {
             }
             PaneItem::Plugins(_) => TabInfo { title: "Plugins".into(), kind: TabIcon::Plugins, path: None, dirty: false },
             PaneItem::Settings(_) => TabInfo { title: "Settings".into(), kind: TabIcon::Settings, path: None, dirty: false },
+            PaneItem::DbConsole(c) => TabInfo { title: c.read(cx).title(cx), kind: TabIcon::Console, path: None, dirty: false },
+            PaneItem::DbTable(t) => TabInfo { title: t.read(cx).table.clone(), kind: TabIcon::Table, path: None, dirty: false },
         }
     }
 
@@ -714,6 +847,8 @@ fn tab_icon(info: &TabInfo) -> gpui::AnyElement {
     match info.kind {
         TabIcon::Plugins => icon(Icon::Puzzle, 14., color(c::ACCENT)).into_any_element(),
         TabIcon::Settings => icon(Icon::Settings, 14., color(c::ACCENT)).into_any_element(),
+        TabIcon::Console => icon(Icon::Database, 14., color(c::ACCENT)).into_any_element(),
+        TabIcon::Table => icon(Icon::Table, 14., color(c::ACCENT)).into_any_element(),
         TabIcon::File | TabIcon::Diff => crate::file_icons::file_icon(Path::new(&info.title)).into_any_element(),
     }
 }
@@ -852,6 +987,8 @@ impl Render for EditorPane {
             Some(PaneItem::Diff(d)) => d.clone().into_any_element(),
             Some(PaneItem::Plugins(p)) => p.clone().into_any_element(),
             Some(PaneItem::Settings(p)) => p.clone().into_any_element(),
+            Some(PaneItem::DbConsole(c)) => c.clone().into_any_element(),
+            Some(PaneItem::DbTable(t)) => t.clone().into_any_element(),
             None => empty_state().into_any_element(),
         };
         let problems = self.render_problems(cx);

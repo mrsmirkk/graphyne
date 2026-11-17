@@ -13,6 +13,7 @@ graphyne-terminal.workspace = true
 graphyne-git.workspace = true
 graphyne-lsp.workspace = true
 graphyne-dap.workspace = true
+graphyne-db.workspace = true
 serde_json.workspace = true
 gpui.workspace = true
 anyhow.workspace = true

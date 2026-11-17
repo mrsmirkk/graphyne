@@ -48,6 +48,10 @@ pub enum TabKind {
     Plugins,
     /// The Settings page.
     Settings,
+    /// The SQL console of a database connection (`db`); `path` is its text.
+    DbConsole,
+    /// The rows of table `table` of connection `db`.
+    DbTable,
 }
 
 /// One editor tab. Positions are (line, column) from 0, so they survive outside edits.
@@ -64,6 +68,12 @@ pub struct TabState {
     pub scroll_x: f32,
     /// First lines of the folded code regions.
     pub folds: Vec<usize>,
+    /// Database connection id (console and table tabs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db: Option<String>,
+    /// Table name (table tabs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
 }
 
 /// Everything about one project's window worth restoring.
@@ -150,6 +160,13 @@ pub fn load_session() -> Session {
 pub fn save_session(session: &Session) -> anyhow::Result<()> {
     let Some(dir) = state_dir() else { return Ok(()) };
     write_json(&dir.join("session.json"), session)
+}
+
+/// Graphyne's own data for project `root` that is not layout (database connections, SQL
+/// consoles): a folder next to its state file, `projects/<name>-<hash>/`.
+pub fn project_data_dir(root: &Path) -> Option<PathBuf> {
+    let dir = state_dir()?;
+    Some(project_file(&dir, root).with_extension(""))
 }
 
 /// The saved layout of `root`, if it was ever open.

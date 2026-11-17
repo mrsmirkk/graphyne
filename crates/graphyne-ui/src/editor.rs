@@ -1683,6 +1683,23 @@ impl Editor {
         self.buffer.len_lines() - hidden.min(self.buffer.len_lines()) + self.lenses.len() - self.hidden_lenses_before(usize::MAX)
     }
 
+    /// The selected characters (empty at the caret).
+    pub fn selection(&self) -> std::ops::Range<usize> {
+        self.sel.range()
+    }
+
+    /// Add `text` on a new line at the end and put the cursor there (SQL console: a query
+    /// sent from the Database panel).
+    pub fn append_line(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let len = self.buffer.len_chars();
+        let needs_break = len > 0 && self.buffer.rope().char(len - 1) != '\n';
+        let start = len + usize::from(needs_break);
+        let inserted = format!("{}{text}\n", if needs_break { "\n" } else { "" });
+        self.replace(len..len, &inserted, Selection::caret(start), cx);
+        let row = self.buffer.rope().char_to_line(start);
+        self.go_to(row, 0, window, cx);
+    }
+
     /// The file was renamed or moved on disk: follow it. The language server closes the old
     /// document and opens the new one (whose language may differ, e.g. `.txt` → `.py`).
     pub fn set_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
