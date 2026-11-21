@@ -64,6 +64,10 @@ single portable `.exe`.
 | --- | --- |
 | ![Side-by-side diff in the light theme](docs/screenshots/diff-light.png) | ![The Settings tab](docs/screenshots/settings-light.png) |
 
+**Databases** — an SQL console with its result grid, and the schema in the Database panel:
+
+![An SQLite database: a query in the SQL console, its result in the data grid and the tables with their columns in the Database panel](docs/screenshots/database-dark.png)
+
 ## Features
 
 ### Editor
