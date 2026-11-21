@@ -88,6 +88,11 @@ impl DbConsole {
         sql.filter(|s| !s.trim().is_empty())
     }
 
+    /// Run (▷ in the title bar, Shift+F10) while this console is the active tab.
+    pub fn run_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.run(&RunStatement, window, cx);
+    }
+
     fn run(&mut self, _: &RunStatement, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
             return;
@@ -217,24 +222,31 @@ impl DbConsole {
             .border_color(color(c::BORDER))
             .font_family(theme::fonts().ui)
             .text_color(color(c::TEXT))
-            .child(
-                button("console-run", Icon::Play, if busy { color(c::TEXT_FAINT) } else { color(c::GREEN) }, "Run")
-                    .when(!busy, |b| b.cursor_pointer().hover(|s| s.bg(color(c::HOVER))))
-                    .when(busy, |b| b.text_color(color(c::TEXT_FAINT)))
-                    .tooltip(tooltip("Run the statement under the cursor, or the selection", Some("Ctrl+Enter")))
-                    .on_click(cx.listener(|this, _, window, cx| this.run(&RunStatement, window, cx))),
-            )
+            // Running is the title bar's ▷ (and Ctrl+Enter); the console only adds Stop.
             .child(
                 button("console-stop", Icon::Stop, if busy { color(c::RED) } else { color(c::TEXT_FAINT) }, "Stop")
                     .when(busy, |b| b.cursor_pointer().hover(|s| s.bg(color(c::HOVER))))
                     .when(!busy, |b| b.text_color(color(c::TEXT_FAINT)))
+                    .tooltip(tooltip("Stop the running query", None))
                     .on_click(cx.listener(|this, _, window, cx| this.stop(&StopQuery, window, cx))),
             )
             .child(div().w(px(1.)).h(px(16.)).mx(px(4.)).bg(color(c::BORDER)))
             .child(icon(Icon::Database, 14., color(c::TEXT_MUTED)))
             .child(div().text_size(px(theme::UI_SMALL)).text_color(color(c::TEXT_MUTED)).child(name))
             .child(div().flex_1())
-            .child(div().flex().items_center().gap(px(4.)).text_size(px(11.)).text_color(color(c::TEXT_FAINT)).child(kbd("Ctrl")).child(kbd("Enter")).child("runs the statement under the cursor"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .text_size(px(11.))
+                    .text_color(color(c::TEXT_FAINT))
+                    .child(icon(Icon::Play, 11., color(c::TEXT_DIM)))
+                    .child("Run or")
+                    .child(kbd("Ctrl"))
+                    .child(kbd("Enter"))
+                    .child("runs the statement under the cursor"),
+            )
     }
 }
 

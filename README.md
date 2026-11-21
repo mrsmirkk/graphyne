@@ -122,8 +122,8 @@ single portable `.exe`.
 - A **Database** panel (right side): connections → tables and views → columns with types and
   primary keys. **SQLite is built in** — nothing to install; opening a `.db` / `.sqlite` file from
   the project tree adds it.
-- **SQL console** per connection: `Ctrl+Enter` runs the statement under the cursor or the
-  selection (scripts too), **Stop** cancels a long query, errors show with the failing statement.
+- **SQL console** per connection: Run (the ▷ in the title bar) or `Ctrl+Enter` runs the statement
+  under the cursor or the selection (scripts too), **Stop** cancels a long query, errors show with the failing statement.
   The console text is kept between sessions.
 - **Data grid** for results and tables: virtualized (200,000 rows scroll smoothly), sort by a
   column, resize columns, keyboard navigation, copy a cell; tables show the total row count.

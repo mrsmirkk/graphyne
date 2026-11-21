@@ -1321,6 +1321,11 @@ impl Workspace {
     }
 
     fn run_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // One Run for everything: in an SQL console it runs the query.
+        if let Some(PaneItem::DbConsole(console)) = self.pane.read(cx).active_item().cloned() {
+            console.update(cx, |c, cx| c.run_query(window, cx));
+            return;
+        }
         let Some(editor) = self.pane.read(cx).active_editor() else {
             self.notify_user("Open a file to run it", true, cx);
             return;
@@ -1555,6 +1560,8 @@ impl Workspace {
 
     fn render_title_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tint = color(c::TEXT_MUTED);
+        // In an SQL console, ▷ runs the query.
+        let console_active = matches!(self.pane.read(cx).active_item(), Some(PaneItem::DbConsole(_)));
         let left_cluster = div()
             .flex()
             .flex_1()
@@ -1647,7 +1654,8 @@ impl Workspace {
             )
             .child(
                 title_button("run", Icon::Play, color(c::TEXT))
-                    .tooltip(tooltip("Run", Some("Shift+F10")))
+                    .when(!console_active, |b| b.tooltip(tooltip("Run", Some("Shift+F10"))))
+                    .when(console_active, |b| b.tooltip(tooltip("Run Query: the statement under the cursor, or the selection", Some("Ctrl+Enter"))))
                     .on_click(cx.listener(|this, _, w, cx| this.run_active(w, cx))),
             )
             .child(
