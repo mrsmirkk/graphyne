@@ -300,6 +300,92 @@ impl DatabasePanel {
         cx.notify();
     }
 
+    /// Import a CSV file picked by the user: into the table `into` (columns matched by the
+    /// header), or into a new table named after the file. One transaction: all rows or none.
+    fn import_csv(&mut self, id: String, into: Option<(Option<String>, String)>, cx: &mut Context<Self>) {
+        self.menu = None;
+        let root = self.store.read(cx).root().to_path_buf();
+        let picked = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Import".into()), directory: Some(root) });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let file = path.clone();
+            let parsed = cx
+                .background_spawn(async move { std::fs::read(&file).map_err(|e| e.to_string()).and_then(|bytes| graphyne_db::parse_csv(&String::from_utf8_lossy(&bytes))) })
+                .await;
+            let fail = |e: String, cx: &mut Context<Self>| cx.emit(DbPanelEvent::Notify(format!("Import failed: {e}"), true));
+            // The statements and the table they fill, worked out from the schema.
+            let Ok(plan) = this.update(cx, |this, cx| {
+                let csv = parsed?;
+                if csv.rows.is_empty() {
+                    return Err("the file has a header but no rows".to_string());
+                }
+                let store = this.store.read(cx);
+                let entry = store.entry(&id).ok_or("the connection was removed")?;
+                let kind = entry.config.kind.clone();
+                match &into {
+                    Some((schema, table)) => {
+                        let known = entry.schema.as_ref().and_then(|s| s.tables.iter().find(|t| t.schema == *schema && t.name == *table));
+                        let columns: Vec<String> = known.ok_or("reload the schema first")?.columns.iter().map(|c| c.name.clone()).collect();
+                        let targets = graphyne_db::match_columns(&csv.header, &columns)?;
+                        let quoted = kind.quote_table(schema.as_deref(), table);
+                        Ok((kind.begin_sql(), kind.import_statements(&quoted, &targets, None, &csv.rows), schema.clone(), table.clone(), csv.rows.len()))
+                    }
+                    None => {
+                        let stem = path.file_stem().map(|s| s.to_string_lossy().trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "imported".into());
+                        let taken = |name: &str| entry.schema.as_ref().is_some_and(|s| s.tables.iter().chain(&s.views).any(|t| t.name.eq_ignore_ascii_case(name)));
+                        let mut name = stem.clone();
+                        let mut n = 2;
+                        while taken(&name) {
+                            name = format!("{stem}_{n}");
+                            n += 1;
+                        }
+                        let quoted = kind.quote_table(None, &name);
+                        let mut statements = vec![kind.create_table_sql(&quoted, &csv)];
+                        statements.extend(kind.import_statements(&quoted, &csv.header, Some(&csv.column_types()), &csv.rows));
+                        Ok((kind.begin_sql(), statements, None, name, csv.rows.len()))
+                    }
+                }
+            }) else {
+                return;
+            };
+            let (begin, statements, schema, table, rows) = match plan {
+                Ok(plan) => plan,
+                Err(e) => {
+                    this.update(cx, |_, cx| fail(e, cx)).ok();
+                    return;
+                }
+            };
+            let Ok(waiting) = this.update(cx, |this, cx| this.store.update(cx, |s, cx| s.session(&id, cx))) else { return };
+            let result = match waiting.recv_async().await {
+                Ok(Ok(session)) => session.run_transaction(begin, statements).recv_async().await.unwrap_or_else(|_| Err((0, "the connection was closed".into()))).map_err(|(_, e)| e),
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err("the connection was closed".into()),
+            };
+            this.update(cx, |this, cx| match result {
+                Ok(_) => {
+                    let new = into.is_none();
+                    this.store.update(cx, |s, cx| s.load_schema(&id, cx));
+                    this.expanded.insert(format!("c/{id}"));
+                    this.expanded.insert(format!("g/{id}/tables"));
+                    let shown = match &schema {
+                        Some(s) => format!("{s}.{table}"),
+                        None => table.clone(),
+                    };
+                    this.selected = Some(format!("t/{id}/{shown}"));
+                    let what = if new { "new table" } else { "table" };
+                    cx.emit(DbPanelEvent::Notify(format!("Imported {} rows into {what} {shown}", super::group_digits(rows as u64)), false));
+                    cx.emit(DbPanelEvent::OpenTable(id.clone(), schema.clone(), table.clone()));
+                    cx.notify();
+                }
+                Err(e) => fail(e, cx),
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn open_menu(&mut self, target: MenuTarget, position: Point<Pixels>, cx: &mut Context<Self>) {
         self.menu = Some((target, position));
         cx.notify();
@@ -357,7 +443,7 @@ impl DatabasePanel {
                     .child(item("db-new-file", "New SQLite Database…", Icon::FilePlus).on_click(cx.listener(|this, _, _, cx| this.create_new(cx))));
             }
             MenuTarget::Connection(id) => {
-                let (console, refresh, remove, edit) = (id.clone(), id.clone(), id.clone(), id.clone());
+                let (console, refresh, remove, edit, import) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
                 let file = self.store.read(cx).entry(id).and_then(|e| e.config.file().map(|p| p.to_path_buf()));
                 let server = self.store.read(cx).entry(id).is_some_and(|e| e.config.kind.server().is_some());
                 menu = menu
@@ -380,6 +466,7 @@ impl DatabasePanel {
                         });
                         this.expand_connection(&id, cx);
                     })))
+                    .child(item("db-import-new", "Import CSV as New Table…", Icon::FilePlus).on_click(cx.listener(move |this, _, _, cx| this.import_csv(import.clone(), None, cx))))
                     .child(separator());
                 if let Some(file) = file {
                     let (reveal, copy) = (file.clone(), file);
@@ -410,6 +497,8 @@ impl DatabasePanel {
                     Some(s) => format!("{s}.{table}"),
                     None => table.clone(),
                 };
+                let is_table = self.store.read(cx).entry(id).and_then(|e| e.schema.as_ref()).is_some_and(|s| s.tables.iter().any(|t| t.schema == *schema && t.name == *table));
+                let (import_db, import_into) = (id.clone(), (schema.clone(), table.clone()));
                 menu = menu
                     .child(item("db-open-table", "Open Data", Icon::Table).on_click(cx.listener(move |this, _, _, cx| {
                         close(this, cx);
@@ -419,6 +508,9 @@ impl DatabasePanel {
                         close(this, cx);
                         cx.emit(DbPanelEvent::OpenConsole(console_db.clone(), Some(console_sql.clone())));
                     })))
+                    .when(is_table, |m| {
+                        m.child(item("db-import-into", "Import CSV…", Icon::FilePlus).on_click(cx.listener(move |this, _, _, cx| this.import_csv(import_db.clone(), Some(import_into.clone()), cx))))
+                    })
                     .child(separator())
                     .child(item("db-copy-name", "Copy Name", Icon::Copy).on_click(cx.listener(move |this, _, _, cx| {
                         close(this, cx);

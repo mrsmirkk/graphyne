@@ -137,6 +137,10 @@ single portable `.exe`.
   them all in one transaction (nothing is saved if a row was changed elsewhere meanwhile) or
   **Revert** drops them.
 - **Export** results and tables to **CSV, JSON or SQL INSERT** statements; copy a cell or a row.
+- **Import CSV** (comma, semicolon or tab separated): right-click a connection to create a new
+  table with guessed column types (whole numbers, decimals, text; `007` stays text; a first `id`
+  column of distinct numbers becomes the primary key), or a table to add rows to it, columns
+  matched by the header. One transaction: all rows or none.
 - Connections and consoles live in Graphyne's own state folder — nothing is written into the
   project.
 
@@ -175,8 +179,8 @@ single portable `.exe`.
 
 Planned, roughly in this order:
 
-- [ ] **Databases, next steps** — SSH tunnels, editing query results (not only table tabs),
-      importing CSV (connections, the schema browser, the SQL console, editing and export are done).
+- [ ] **Databases, next steps** — SSH tunnels, editing query results (not only table tabs)
+      (connections, the schema browser, the SQL console, editing, export and CSV import are done).
 - [ ] **Keymap editor** in Settings.
 - [ ] **Debugging beyond Python** verified end to end: Rust / C / C++ (`lldb-dap`), Go (`delve`),
       JavaScript / TypeScript.
