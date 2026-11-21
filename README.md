@@ -2,12 +2,13 @@
 
 # Graphyne
 
-**A fast, native code editor written in Rust — with a debugger, Git, a terminal and
-LuaJIT extensions built in.**
+**A fast, native code editor written in Rust — with a debugger, Git, a terminal, a database
+tool and LuaJIT extensions built in.**
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)
 ![Status: alpha](https://img.shields.io/badge/status-alpha-orange)
+[![Latest release](https://img.shields.io/github/v/release/mrsmirkk/graphyne?include_prereleases&label=release)](https://github.com/mrsmirkk/graphyne/releases)
 ![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-B7410E)
 
 </div>
@@ -38,7 +39,7 @@ single portable `.exe`.
 
 ## Highlights
 
-- **Native and portable** — one ~65 MB executable, no installer, no runtime to install.
+- **Native and portable** — one ~70 MB executable, no installer, no runtime to install.
 - **Run anything with one key** — `Shift+F10` runs the current file in ~20 languages; HTML gets a
   live-reloading preview.
 - **Real debugger** — breakpoints, conditions, logpoints, inline values, variables and an
@@ -49,6 +50,9 @@ single portable `.exe`.
   failing in the terminal.
 - **Git, the visual way** — branch graph, side-by-side diffs with word-level highlights, and
   commits of selected changes only.
+- **Databases built in** — SQLite, PostgreSQL and MySQL / MariaDB: a schema browser, an SQL
+  console, a fast data grid with editing, export and CSV import; passwords stay in the Windows
+  Credential Manager.
 - **Picks up where you left off** — open tabs, cursors, scroll positions, folded code, panels and
   window placement come back on the next launch.
 - **Extensible with LuaJIT** — themes, new languages (with tree-sitter highlighting), shortcuts
