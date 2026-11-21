@@ -1,14 +1,15 @@
 //! A SQL console tab: an editor for the connection's queries (kept between sessions) above
 //! the results. Ctrl+Enter runs the statement under the cursor, or the selection.
 
-use super::grid::{DataGrid, NoPreview};
+use super::grid::{DataGrid, GridEvent, NoPreview};
 use super::{DbStore, RunStatement, StopQuery, format_elapsed, group_digits};
 use crate::assets::Icon;
 use crate::components::{icon, kbd, tooltip};
 use crate::editor::Editor;
 use crate::theme::{self, c, color, color_a};
 use gpui::prelude::*;
-use gpui::{App, Context, DragMoveEvent, Entity, FocusHandle, Focusable, SharedString, Window, div, px, relative};
+use gpui::{App, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Window, div, px, relative};
+use graphyne_db::ExportFormat;
 use graphyne_db::{DbSession, QueryOutcome, ROW_LIMIT, StatementResult};
 use std::sync::Arc;
 
@@ -25,6 +26,11 @@ enum Tone {
 #[derive(Clone)]
 struct ResizeResults;
 
+pub enum ConsoleEvent {
+    /// A message for the notifications (exports).
+    Notify(String),
+}
+
 pub struct DbConsole {
     pub db_id: String,
     store: Entity<DbStore>,
@@ -39,7 +45,11 @@ pub struct DbConsole {
     /// Share of the height given to the results.
     results_ratio: f32,
     _store_sub: gpui::Subscription,
+    _grid_sub: gpui::Subscription,
+    export_menu: Option<Point<Pixels>>,
 }
+
+impl EventEmitter<ConsoleEvent> for DbConsole {}
 
 impl Focusable for DbConsole {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -56,17 +66,24 @@ fn changes_schema(sql: &str) -> bool {
 impl DbConsole {
     pub fn new(db_id: String, store: Entity<DbStore>, editor: Entity<Editor>, cx: &mut Context<Self>) -> Self {
         let sub = cx.observe(&store, |_, _, cx| cx.notify());
+        let grid = cx.new(DataGrid::new);
+        let grid_sub = cx.subscribe(&grid, |_, _, ev: &GridEvent, cx| match ev {
+            GridEvent::Notify(m) => cx.emit(ConsoleEvent::Notify(m.clone())),
+            GridEvent::EditsChanged => {}
+        });
         Self {
             db_id,
             store,
             editor,
-            grid: cx.new(DataGrid::new),
+            grid,
             running: None,
             busy: false,
             status: None,
             failed_sql: None,
             results_ratio: 0.5,
             _store_sub: sub,
+            _grid_sub: grid_sub,
+            export_menu: None,
         }
     }
 
@@ -253,6 +270,12 @@ impl DbConsole {
 impl Render for DbConsole {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_rows = self.grid.read(cx).has_columns();
+        let menu = self.export_menu.map(|position| {
+            super::table::export_menu(position, cx, |this, format, cx| this.export(format, cx), |this, cx| {
+                this.export_menu = None;
+                cx.notify();
+            })
+        });
         let (status, tone) = self.status.clone().map(|(s, t)| (Some(s), t)).unwrap_or((None, Tone::Info));
         let status_color = match tone {
             Tone::Info => color(c::TEXT_MUTED),
@@ -271,7 +294,33 @@ impl Render for DbConsole {
             .font_family(theme::fonts().ui)
             .text_size(px(theme::UI_SMALL))
             .child(div().text_color(color(c::TEXT)).font_weight(gpui::FontWeight::MEDIUM).child("Result"))
-            .when_some(status.clone().filter(|_| tone != Tone::Error), |d, s| d.child(div().min_w(px(0.)).overflow_hidden().whitespace_nowrap().text_color(status_color).child(s)));
+            .when_some(status.clone().filter(|_| tone != Tone::Error), |d, s| d.child(div().min_w(px(0.)).overflow_hidden().whitespace_nowrap().text_color(status_color).child(s)))
+            .child(div().flex_1())
+            .when(has_rows && tone != Tone::Error, |d| {
+                d.child(
+                    div()
+                        .id("console-export")
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .h(px(22.))
+                        .px(px(8.))
+                        .rounded(px(5.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(color(c::HOVER)))
+                        .text_color(color(c::TEXT))
+                        .child(icon(Icon::FolderOpen, 13., color(c::TEXT_MUTED)))
+                        .child("Export")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.export_menu = Some(ev.position);
+                                cx.notify();
+                            }),
+                        ),
+                )
+            });
         let body: gpui::AnyElement = if tone == Tone::Error {
             let failed = self.failed_sql.clone();
             div()
@@ -326,5 +375,17 @@ impl Render for DbConsole {
                     .on_drag(ResizeResults, |_, _, _, cx| cx.new(|_| NoPreview)),
             )
             .child(div().flex().flex_col().flex_1().min_h(px(0.)).child(results_header).child(div().flex().flex_col().flex_1().min_h(px(0.)).child(body)))
+            .children(menu)
+    }
+}
+
+impl DbConsole {
+    /// Save the result as a file (INSERTs go into a table called `result`).
+    fn export(&mut self, format: ExportFormat, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let Some(kind) = store.entry(&self.db_id).map(|e| e.config.kind.clone()) else { return };
+        let dir = store.root().to_path_buf();
+        let table = kind.quote_ident("result");
+        self.grid.update(cx, |g, cx| g.export(format, kind, table, "result".into(), dir, cx));
     }
 }

@@ -6,6 +6,8 @@
 //! reached over the network. All engines sit behind the same [`Driver`] interface.
 
 mod config;
+pub mod edit;
+pub mod export;
 mod mysql_driver;
 mod pg;
 pub mod secrets;
@@ -14,6 +16,8 @@ pub mod split;
 mod sqlite;
 mod value;
 
+pub use edit::{CellEdit, EditStatement};
+pub use export::{ExportFormat, export};
 pub use config::{DbConfig, DbKind, SQLITE_EXTENSIONS, ServerConfig, SslMode, is_sqlite_file, load_configs, save_configs};
 pub use session::DbSession;
 pub use sqlite::create_sqlite;

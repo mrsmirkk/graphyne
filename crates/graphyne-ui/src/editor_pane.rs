@@ -2,7 +2,7 @@
 
 use crate::assets::Icon;
 use crate::components::{icon, island, island_header, kbd, tooltip};
-use crate::database::{DbConsole, DbStore, DbTableEvent, DbTableView};
+use crate::database::{ConsoleEvent, DbConsole, DbStore, DbTableEvent, DbTableView};
 use crate::diff_view::{DiffEvent, DiffView, HunkSelection};
 use crate::editor::{Editor, EditorEvent};
 use crate::hex_view::HexView;
@@ -282,7 +282,11 @@ impl EditorPane {
         let store = self.db.clone().expect("database store");
         // No language server for consoles: highlighting and word completion are enough here.
         let editor = cx.new(|cx| Editor::new(Some(path), buffer, self.root.clone(), None, None, cx));
-        cx.new(|cx| DbConsole::new(db_id, store, editor, cx))
+        let console = cx.new(|cx| DbConsole::new(db_id, store, editor, cx));
+        self.subs.push(cx.subscribe(&console, |_, _, ev: &ConsoleEvent, cx| match ev {
+            ConsoleEvent::Notify(m) => cx.emit(PaneEvent::Notify(m.clone())),
+        }));
+        console
     }
 
     /// Connection `db_id` was removed: close its console and table tabs (the console text is
@@ -339,6 +343,7 @@ impl EditorPane {
         let view = cx.new(|cx| DbTableView::new(db_id, schema, table, store, cx));
         self.subs.push(cx.subscribe_in(&view, window, |this, _, ev: &DbTableEvent, window, cx| match ev {
             DbTableEvent::OpenConsole(db, sql) => this.open_db_console(db.clone(), Some(sql.clone()), window, cx),
+            DbTableEvent::Notify(m) => cx.emit(PaneEvent::Notify(m.clone())),
         }));
         view
     }

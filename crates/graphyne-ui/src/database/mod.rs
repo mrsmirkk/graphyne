@@ -10,7 +10,7 @@ mod grid;
 mod panel;
 mod table;
 
-pub use console::DbConsole;
+pub use console::{ConsoleEvent, DbConsole};
 pub use form::{ConnectionForm, Engine, FormEvent};
 pub use panel::{DatabasePanel, DbPanelEvent};
 pub use table::{DbTableEvent, DbTableView};

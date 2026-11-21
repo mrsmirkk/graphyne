@@ -100,6 +100,34 @@ impl DbSession {
         })
     }
 
+    /// Save grid edits: all statements in one transaction, or none of them. `Ok(rows
+    /// changed)`, or the failing statement's index and the error (everything rolled back).
+    pub fn run_transaction(&self, begin: &'static str, statements: Vec<crate::EditStatement>) -> flume::Receiver<Result<u64, (usize, String)>> {
+        self.call(move |d| {
+            d.run(begin, 0).map_err(|e| (0, e))?;
+            let mut total = 0;
+            for (i, statement) in statements.iter().enumerate() {
+                let failed = match d.run(&statement.sql, 0) {
+                    Ok(StatementResult::Done { affected: 0 }) if statement.expect_one_row => {
+                        Some("the row was not found: it may have been changed or deleted elsewhere. Reload and try again.".to_string())
+                    }
+                    Ok(StatementResult::Done { affected }) => {
+                        total += affected;
+                        None
+                    }
+                    Ok(StatementResult::Rows(_)) => None,
+                    Err(e) => Some(e),
+                };
+                if let Some(e) = failed {
+                    let _ = d.run("ROLLBACK", 0);
+                    return Err((i, e));
+                }
+            }
+            d.run("COMMIT", 0).map_err(|e| (statements.len(), e))?;
+            Ok(total)
+        })
+    }
+
     /// Stop the statement that is running now; it ends with an "interrupted" error.
     pub fn interrupt(&self) {
         (self.interrupt)()
@@ -250,6 +278,41 @@ mod tests {
         let rows = rows.unwrap();
         assert_eq!((rows.rows.len(), rows.truncated, total), (2, true, Some(RowCount { rows: 3, exact: true })));
         assert!(db.version().recv().unwrap().unwrap().starts_with("SQLite 3."));
+        drop(db);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn grid_edits_save_all_or_nothing() {
+        use crate::CellEdit;
+        let path = temp_db("edits");
+        let config = DbConfig::sqlite(&path, &[]);
+        let kind = config.kind.clone();
+        let db = DbSession::open(&config).unwrap();
+        db.run_script("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, n INTEGER DEFAULT 5); INSERT INTO t VALUES (1, 'a', 1), (2, 'b', 2), (3, 'c', 3);".into(), 10).recv().unwrap();
+        let table = kind.quote_table(None, "t");
+        let (one, two, missing) = (Value::Int(1), Value::Int(2), Value::Int(99));
+        let statements = vec![
+            kind.delete_sql(&table, &[("id", &two)]),
+            kind.update_sql(&table, &[("name", &CellEdit::Text("it's".into())), ("n", &CellEdit::Null)], &[("id", &one)]),
+            kind.insert_sql(&table, &[("name", &CellEdit::Text("new".into()))]),
+        ];
+        assert_eq!(db.run_transaction(kind.begin_sql(), statements).recv().unwrap(), Ok(3));
+        let rows = |db: &DbSession| match db.run_script("SELECT id, name, n FROM t ORDER BY id".into(), 10).recv().unwrap().remove(0).result {
+            Ok(StatementResult::Rows(r)) => r.rows,
+            other => panic!("{other:?}"),
+        };
+        let after = rows(&db);
+        assert_eq!(after.len(), 3);
+        assert_eq!(after[0], vec![Value::Int(1), Value::Text("it's".into()), Value::Null]);
+        assert_eq!(after[2], vec![Value::Int(4), Value::Text("new".into()), Value::Int(5)]);
+
+        // A row changed elsewhere: nothing is saved, not even the statements before it.
+        let statements = vec![kind.delete_sql(&table, &[("id", &one)]), kind.update_sql(&table, &[("name", &CellEdit::Text("x".into()))], &[("id", &missing)])];
+        let (index, error) = db.run_transaction(kind.begin_sql(), statements).recv().unwrap().unwrap_err();
+        assert_eq!(index, 1);
+        assert!(error.contains("not found"), "{error}");
+        assert_eq!(rows(&db), after);
         drop(db);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }

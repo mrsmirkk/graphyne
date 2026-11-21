@@ -46,6 +46,14 @@ impl Value {
         }
     }
 
+    /// For exports: binary data as `0xCAFE` when it was read whole, otherwise as shown.
+    pub fn export_text(&self) -> String {
+        match self {
+            Value::Blob { len, head } if *len == head.len() => format!("0x{}", head.iter().map(|b| format!("{b:02X}")).collect::<String>()),
+            other => other.to_text(),
+        }
+    }
+
     /// One line for a grid cell: line breaks shown as `⏎`, cut to `max_chars` with `…`.
     pub fn display(&self, max_chars: usize) -> String {
         let text = match self {
