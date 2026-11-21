@@ -33,6 +33,22 @@ pub fn statements(sql: &str) -> Vec<Range<usize>> {
                 }
                 i += 1;
             }
+            // PostgreSQL dollar quoting: `$$ … $$`, `$body$ … $body$` (not `$1` parameters).
+            b'$' => {
+                let mut j = i + 1;
+                while j < n && (b[j].is_ascii_alphabetic() || b[j] == b'_' || (j > i + 1 && b[j].is_ascii_digit())) {
+                    j += 1;
+                }
+                if j < n && b[j] == b'$' {
+                    let tag = &sql[i..=j];
+                    i = match sql[j + 1..].find(tag) {
+                        Some(p) => j + 1 + p + tag.len(),
+                        None => n,
+                    };
+                } else {
+                    i += 1;
+                }
+            }
             b'[' => {
                 while i < n && b[i] != b']' {
                     i += 1;
@@ -178,6 +194,17 @@ mod tests {
         assert_eq!(texts(sql), vec!["SELECT 'a;b' AS \"x;y\"", "INSERT INTO t VALUES (1)", "SELECT [a;b] FROM t"]);
         assert_eq!(texts("  ;; -- only a comment\n ; "), Vec::<&str>::new());
         assert_eq!(texts("select 'it''s; fine'"), vec!["select 'it''s; fine'"]);
+    }
+
+    #[test]
+    fn dollar_quoted_bodies_stay_whole() {
+        let sql = "CREATE FUNCTION f() RETURNS int AS $$ BEGIN RETURN 1; END; $$ LANGUAGE plpgsql;
+DO $body$ BEGIN PERFORM 1; END $body$;
+SELECT $1, price$ FROM t";
+        let parts = texts(sql);
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert!(parts[0].ends_with("LANGUAGE plpgsql") && parts[1].ends_with("END $body$"));
+        assert_eq!(parts[2], "SELECT $1, price$ FROM t");
     }
 
     #[test]

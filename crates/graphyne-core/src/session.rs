@@ -74,6 +74,9 @@ pub struct TabState {
     /// Table name (table tabs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table: Option<String>,
+    /// The table's schema, when not the default one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
 }
 
 /// Everything about one project's window worth restoring.

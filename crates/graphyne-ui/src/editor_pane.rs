@@ -285,10 +285,38 @@ impl EditorPane {
         cx.new(|cx| DbConsole::new(db_id, store, editor, cx))
     }
 
+    /// Connection `db_id` was removed: close its console and table tabs (the console text is
+    /// saved first, as on any close).
+    pub fn close_db_tabs(&mut self, db_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let active = self.items.get(self.active).map(|i| i.focus_handle(cx));
+        let before = self.items.len();
+        self.items.retain(|item| match item {
+            PaneItem::DbConsole(c) => {
+                if c.read(cx).db_id != db_id {
+                    return true;
+                }
+                let editor = c.read(cx).editor.clone();
+                if let Some(task) = editor.update(cx, |e, cx| e.save(cx)) {
+                    task.detach();
+                }
+                false
+            }
+            PaneItem::DbTable(t) => t.read(cx).db_id != db_id,
+            _ => true,
+        });
+        if self.items.len() == before {
+            return;
+        }
+        self.active = active.and_then(|f| self.items.iter().position(|i| i.focus_handle(cx) == f)).unwrap_or(self.active.min(self.items.len().saturating_sub(1)));
+        self.focus_active(window, cx);
+        cx.emit(PaneEvent::Changed);
+        cx.notify();
+    }
+
     /// Open (or focus and refresh) the rows of `table` of connection `db_id`.
-    pub fn open_db_table(&mut self, db_id: String, table: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_db_table(&mut self, db_id: String, schema: Option<String>, table: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(store) = self.db.clone() else { return };
-        match self.items.iter().position(|i| matches!(i, PaneItem::DbTable(t) if t.read(cx).db_id == db_id && t.read(cx).table == table)) {
+        match self.items.iter().position(|i| matches!(i, PaneItem::DbTable(t) if t.read(cx).db_id == db_id && t.read(cx).schema == schema && t.read(cx).table == table)) {
             Some(ix) => {
                 self.active = ix;
                 if let PaneItem::DbTable(t) = &self.items[ix] {
@@ -296,7 +324,7 @@ impl EditorPane {
                 }
             }
             None => {
-                let view = self.new_db_table(db_id, table, store, window, cx);
+                let view = self.new_db_table(db_id, schema, table, store, window, cx);
                 let at = (self.active + 1).min(self.items.len());
                 self.items.insert(at, PaneItem::DbTable(view));
                 self.active = at;
@@ -307,8 +335,8 @@ impl EditorPane {
         cx.notify();
     }
 
-    fn new_db_table(&mut self, db_id: String, table: String, store: Entity<DbStore>, window: &mut Window, cx: &mut Context<Self>) -> Entity<DbTableView> {
-        let view = cx.new(|cx| DbTableView::new(db_id, table, store, cx));
+    fn new_db_table(&mut self, db_id: String, schema: Option<String>, table: String, store: Entity<DbStore>, window: &mut Window, cx: &mut Context<Self>) -> Entity<DbTableView> {
+        let view = cx.new(|cx| DbTableView::new(db_id, schema, table, store, cx));
         self.subs.push(cx.subscribe_in(&view, window, |this, _, ev: &DbTableEvent, window, cx| match ev {
             DbTableEvent::OpenConsole(db, sql) => this.open_db_console(db.clone(), Some(sql.clone()), window, cx),
         }));
@@ -433,7 +461,7 @@ impl EditorPane {
                 }
                 PaneItem::DbTable(t) => {
                     let t = t.read(cx);
-                    TabState { kind: TabKind::DbTable, db: Some(t.db_id.clone()), table: Some(t.table.clone()), ..Default::default() }
+                    TabState { kind: TabKind::DbTable, db: Some(t.db_id.clone()), schema: t.schema.clone(), table: Some(t.table.clone()), ..Default::default() }
                 }
             })
             .collect();
@@ -457,6 +485,7 @@ impl EditorPane {
                     // Database tabs come back only while their connection still exists.
                     let db = tab.db.clone().filter(|id| this.db.as_ref().is_some_and(|s| s.read(cx).entry(id).is_some()));
                     let table = tab.table.clone();
+                    let schema = tab.schema.clone();
                     let item = match (tab.kind, tab.path, file) {
                         (TabKind::DbConsole, Some(path), Some(Ok(Some(buffer)))) if db.is_some() => {
                             let console = this.new_db_console(db.unwrap_or_default(), path, buffer, cx);
@@ -466,7 +495,7 @@ impl EditorPane {
                         }
                         (TabKind::DbTable, _, _) if db.is_some() && table.is_some() => {
                             let store = this.db.clone().expect("checked above");
-                            PaneItem::DbTable(this.new_db_table(db.unwrap_or_default(), table.unwrap_or_default(), store, window, cx))
+                            PaneItem::DbTable(this.new_db_table(db.unwrap_or_default(), schema, table.unwrap_or_default(), store, window, cx))
                         }
                         (TabKind::File, Some(path), Some(Ok(Some(buffer)))) => {
                             let editor = this.new_editor(path, buffer, cx);
@@ -653,7 +682,7 @@ impl EditorPane {
             PaneItem::Plugins(_) => TabInfo { title: "Plugins".into(), kind: TabIcon::Plugins, path: None, dirty: false },
             PaneItem::Settings(_) => TabInfo { title: "Settings".into(), kind: TabIcon::Settings, path: None, dirty: false },
             PaneItem::DbConsole(c) => TabInfo { title: c.read(cx).title(cx), kind: TabIcon::Console, path: None, dirty: false },
-            PaneItem::DbTable(t) => TabInfo { title: t.read(cx).table.clone(), kind: TabIcon::Table, path: None, dirty: false },
+            PaneItem::DbTable(t) => TabInfo { title: t.read(cx).title(), kind: TabIcon::Table, path: None, dirty: false },
         }
     }
 

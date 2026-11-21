@@ -17,6 +17,8 @@ pub enum DbTableEvent {
 
 pub struct DbTableView {
     pub db_id: String,
+    /// PostgreSQL schema / MySQL database, when not the default one.
+    pub schema: Option<String>,
     pub table: String,
     store: Entity<DbStore>,
     grid: Entity<DataGrid>,
@@ -34,8 +36,8 @@ impl Focusable for DbTableView {
 }
 
 impl DbTableView {
-    pub fn new(db_id: String, table: String, store: Entity<DbStore>, cx: &mut Context<Self>) -> Self {
-        let mut view = Self { db_id, table, store, grid: cx.new(DataGrid::new), loading: false, status: None, error: None };
+    pub fn new(db_id: String, schema: Option<String>, table: String, store: Entity<DbStore>, cx: &mut Context<Self>) -> Self {
+        let mut view = Self { db_id, schema, table, store, grid: cx.new(DataGrid::new), loading: false, status: None, error: None };
         view.load(cx);
         view
     }
@@ -47,11 +49,11 @@ impl DbTableView {
         self.loading = true;
         self.error = None;
         let waiting = self.store.update(cx, |s, cx| s.session(&self.db_id, cx));
-        let table = self.table.clone();
+        let (schema, table) = (self.schema.clone(), self.table.clone());
         cx.spawn(async move |this, cx| {
             let started = Instant::now();
             let loaded = match waiting.recv_async().await {
-                Ok(Ok(session)) => session.table_rows(table, ROW_LIMIT).recv_async().await.map_err(|_| "the connection was closed".to_string()),
+                Ok(Ok(session)) => session.table_rows(schema, table, ROW_LIMIT).recv_async().await.map_err(|_| "the connection was closed".to_string()),
                 Ok(Err(e)) => Err(format!("Could not connect: {e}")),
                 Err(_) => Err("the connection was closed".into()),
             };
@@ -63,7 +65,9 @@ impl DbTableView {
                         let elapsed = format_elapsed(started.elapsed());
                         this.status = Some(
                             match total {
-                                Some(total) if total > shown => format!("the first {} of {} rows · {elapsed}", group_digits(shown), group_digits(total)),
+                                // Big server tables report the planner's estimate.
+                                Some(total) if !total.exact => format!("the first {} of about {} rows · {elapsed}", group_digits(shown), group_digits(total.rows)),
+                                Some(total) if total.rows > shown => format!("the first {} of {} rows · {elapsed}", group_digits(shown), group_digits(total.rows)),
                                 _ => format!("{} row{} · {elapsed}", group_digits(shown), if shown == 1 { "" } else { "s" }),
                             }
                             .into(),
@@ -82,6 +86,16 @@ impl DbTableView {
         })
         .detach();
         cx.notify();
+    }
+}
+
+impl DbTableView {
+    /// `schema.table`, or the table alone in the default schema.
+    pub fn title(&self) -> String {
+        match &self.schema {
+            Some(s) => format!("{s}.{}", self.table),
+            None => self.table.clone(),
+        }
     }
 }
 
@@ -115,12 +129,13 @@ impl Render for DbTableView {
             .font_family(theme::fonts().ui)
             .text_color(color(c::TEXT))
             .child(icon(Icon::Table, 15., color(c::ACCENT)))
-            .child(div().font_weight(gpui::FontWeight::MEDIUM).text_size(px(theme::UI_TEXT)).child(self.table.clone()))
+            .child(div().font_weight(gpui::FontWeight::MEDIUM).text_size(px(theme::UI_TEXT)).child(self.title()))
             .child(div().text_size(px(theme::UI_SMALL)).text_color(color(c::TEXT_DIM)).child(name))
             .child(div().w(px(1.)).h(px(16.)).mx(px(4.)).bg(color(c::BORDER)))
             .child(tool("table-refresh", Icon::Refresh, "Refresh").tooltip(tooltip("Read the rows again", None)).on_click(cx.listener(|this, _, _, cx| this.load(cx))))
             .child(tool("table-console", Icon::Terminal, "Query in Console").tooltip(tooltip("Open the SQL console with a SELECT for this table", None)).on_click(cx.listener(|this, _, _, cx| {
-                let sql = format!("SELECT * FROM \"{}\";", this.table.replace('"', "\"\""));
+                let quoted = this.store.read(cx).entry(&this.db_id).map(|e| e.config.kind.quote_table(this.schema.as_deref(), &this.table)).unwrap_or_else(|| this.table.clone());
+                let sql = format!("SELECT * FROM {quoted};");
                 cx.emit(DbTableEvent::OpenConsole(this.db_id.clone(), sql));
             })))
             .child(div().flex_1())

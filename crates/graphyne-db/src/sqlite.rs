@@ -1,6 +1,6 @@
 //! SQLite, built into Graphyne (the `bundled` engine — nothing to install).
 
-use crate::{Column, Driver, ResultSet, Schema, StatementResult, Table, Value};
+use crate::{Column, Driver, Interrupter, ResultSet, RowCount, Schema, StatementResult, Table, Value};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
@@ -17,7 +17,7 @@ fn err(e: rusqlite::Error) -> String {
 
 /// Open an existing database file. Never creates one: a connection whose file is gone must
 /// say so rather than quietly start an empty database.
-pub(crate) fn open(path: &Path) -> Result<(Sqlite, Arc<dyn Fn() + Send + Sync>), String> {
+pub(crate) fn open(path: &Path) -> Result<(Sqlite, Interrupter), String> {
     if !path.is_file() {
         return Err(format!("{} not found", path.display()));
     }
@@ -73,7 +73,7 @@ impl Driver for Sqlite {
         let objects: Vec<(String, String)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?.collect::<Result<_, _>>().map_err(err)?;
         let mut schema = Schema::default();
         for (kind, name) in objects {
-            let table = Table { columns: self.columns(&name)?, name };
+            let table = Table { schema: None, columns: self.columns(&name)?, name };
             if kind == "view" { schema.views.push(table) } else { schema.tables.push(table) }
         }
         Ok(schema)
@@ -105,8 +105,13 @@ impl Driver for Sqlite {
         Ok(StatementResult::Rows(ResultSet { columns, rows: out, truncated }))
     }
 
-    fn count_rows(&mut self, table: &str) -> Result<u64, String> {
-        self.conn.query_row(&format!("SELECT COUNT(*) FROM {}", quote(table)), [], |r| r.get::<_, i64>(0)).map(|n| n as u64).map_err(err)
+    fn count_rows(&mut self, _schema: Option<&str>, table: &str) -> Result<RowCount, String> {
+        let rows = self.conn.query_row(&format!("SELECT COUNT(*) FROM {}", quote(table)), [], |r| r.get::<_, i64>(0)).map_err(err)?;
+        Ok(RowCount { rows: rows as u64, exact: true })
+    }
+
+    fn version(&mut self) -> Result<String, String> {
+        self.conn.query_row("SELECT sqlite_version()", [], |r| r.get::<_, String>(0)).map(|v| format!("SQLite {v}")).map_err(err)
     }
 
     fn quote_ident(&self, name: &str) -> String {

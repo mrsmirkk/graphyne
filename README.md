@@ -120,13 +120,17 @@ single portable `.exe`.
 
 ### Databases
 - A **Database** panel (right side): connections → tables and views → columns with types and
-  primary keys. **SQLite is built in** — nothing to install; opening a `.db` / `.sqlite` file from
-  the project tree adds it.
+  primary keys. **PostgreSQL** and **MySQL / MariaDB** servers (host, port, database, user, SSL
+  mode, Test Connection; tables of other schemas shown as `schema.table`) and **SQLite**, which is
+  built in — opening a `.db` / `.sqlite` file from the project tree adds it.
+- **Passwords are kept in the Windows Credential Manager**, never in Graphyne's files.
 - **SQL console** per connection: Run (the ▷ in the title bar) or `Ctrl+Enter` runs the statement
   under the cursor or the selection (scripts too), **Stop** cancels a long query, errors show with the failing statement.
   The console text is kept between sessions.
 - **Data grid** for results and tables: virtualized (200,000 rows scroll smoothly), sort by a
-  column, resize columns, keyboard navigation, copy a cell; tables show the total row count.
+  column, resize columns, keyboard navigation, copy a cell; tables show the total row count (the
+  server's estimate for very big ones). Exact numbers stay exact: `numeric` / `DECIMAL` values,
+  dates, UUIDs, JSON, arrays and binary data are shown as the server stores them.
 - Connections and consoles live in Graphyne's own state folder — nothing is written into the
   project.
 
@@ -162,8 +166,9 @@ single portable `.exe`.
 
 Planned, roughly in this order:
 
-- [ ] **Databases, next steps** — PostgreSQL and MySQL connections (SQLite, the schema browser,
-      the SQL console and the data grid are done), editing cells in the grid, exporting results.
+- [ ] **Databases, next steps** — editing cells in the grid, exporting results (CSV / JSON),
+      SSH tunnels (PostgreSQL, MySQL / MariaDB and SQLite connections, the schema browser, the SQL
+      console and the data grid are done).
 - [ ] **Keymap editor** in Settings.
 - [ ] **Debugging beyond Python** verified end to end: Rust / C / C++ (`lldb-dap`), Go (`delve`),
       JavaScript / TypeScript.

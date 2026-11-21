@@ -9,7 +9,7 @@
 use crate::actions::*;
 use crate::assets::Icon;
 use crate::components::{header_tab, icon, icon_button, island, island_header, small_icon_button, tooltip, vsep};
-use crate::database::{DatabasePanel, DbPanelEvent, DbStore};
+use crate::database::{ConnectionForm, DatabasePanel, DbPanelEvent, DbStore, Engine, FormEvent};
 use crate::editor_pane::{EditorPane, PaneEvent, PaneItem};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::panels::{FindPanel, GitPanel, HistoryPanel, PanelEvent};
@@ -111,6 +111,9 @@ pub struct Workspace {
     file_tree: Entity<FileTree>,
     db_store: Entity<DbStore>,
     db_panel: Entity<DatabasePanel>,
+    /// The New / Edit Connection dialog while it is open.
+    db_form: Option<Entity<ConnectionForm>>,
+    _db_form_sub: Option<Subscription>,
     find: Entity<FindPanel>,
     git: Entity<GitPanel>,
     history: Entity<HistoryPanel>,
@@ -190,9 +193,15 @@ impl Workspace {
 
         let mut subs = Vec::new();
         subs.push(cx.subscribe_in(&db_panel, window, |this, _, ev, window, cx| match ev {
-            DbPanelEvent::OpenTable(db, table) => {
-                let (db, table) = (db.clone(), table.clone());
-                this.pane.update(cx, |p, cx| p.open_db_table(db, table, window, cx));
+            DbPanelEvent::OpenTable(db, schema, table) => {
+                let (db, schema, table) = (db.clone(), schema.clone(), table.clone());
+                this.pane.update(cx, |p, cx| p.open_db_table(db, schema, table, window, cx));
+            }
+            DbPanelEvent::NewServer(mysql) => this.open_connection_form(None, if *mysql { Engine::Mysql } else { Engine::Postgres }, window, cx),
+            DbPanelEvent::EditConnection(id) => this.open_connection_form(Some(id.clone()), Engine::Postgres, window, cx),
+            DbPanelEvent::Removed(id) => {
+                let id = id.clone();
+                this.pane.update(cx, |p, cx| p.close_db_tabs(&id, window, cx));
             }
             DbPanelEvent::OpenConsole(db, sql) => {
                 let (db, sql) = (db.clone(), sql.clone());
@@ -326,6 +335,8 @@ impl Workspace {
             file_tree,
             db_store,
             db_panel,
+            db_form: None,
+            _db_form_sub: None,
             find,
             git,
             history,
@@ -996,6 +1007,25 @@ impl Workspace {
         let id = self.db_store.update(cx, |s, cx| s.add_sqlite(&path, cx));
         self.db_panel.update(cx, |p, cx| p.reveal(&id, cx));
         self.show_database_panel(cx);
+    }
+
+    /// The New / Edit Connection dialog over the window.
+    fn open_connection_form(&mut self, editing: Option<String>, engine: Engine, window: &mut Window, cx: &mut Context<Self>) {
+        let store = self.db_store.clone();
+        let form = cx.new(|cx| ConnectionForm::new(store, editing, engine, window, cx));
+        self._db_form_sub = Some(cx.subscribe_in(&form, window, |this, _, ev: &FormEvent, window, cx| {
+            if let FormEvent::Saved(id) = ev {
+                let id = id.clone();
+                this.db_panel.update(cx, |p, cx| p.reveal(&id, cx));
+                this.show_database_panel(cx);
+            }
+            this.db_form = None;
+            this._db_form_sub = None;
+            window.focus(&this.focus_handle);
+            cx.notify();
+        }));
+        self.db_form = Some(form);
+        cx.notify();
     }
 
     fn show_database_panel(&mut self, cx: &mut Context<Self>) {
@@ -2575,6 +2605,7 @@ impl Render for Workspace {
             .children(requirements_ask)
             .children(notifications)
             .children(menu)
+            .children(self.db_form.clone())
     }
 }
 

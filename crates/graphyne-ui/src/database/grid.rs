@@ -326,7 +326,7 @@ impl Render for DataGrid {
                         let (text, tint) = match value {
                             Value::Null => ("<null>".to_string(), color(c::TEXT_FAINT)),
                             Value::Blob { .. } => (value.display(max_chars), color(c::TEXT_MUTED)),
-                            Value::Int(_) | Value::Real(_) => (value.display(max_chars), color(c::BLUE)),
+                            Value::Int(_) | Value::Real(_) | Value::Num(_) => (value.display(max_chars), color(c::BLUE)),
                             Value::Text(_) => (value.display(max_chars), color(c::TEXT)),
                         };
                         div()

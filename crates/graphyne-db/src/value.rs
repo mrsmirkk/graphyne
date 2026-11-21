@@ -7,6 +7,9 @@ pub enum Value {
     Null,
     Int(i64),
     Real(f64),
+    /// An exact number kept as the server wrote it (PostgreSQL `numeric`, MySQL `DECIMAL`,
+    /// unsigned 64-bit): `12.50` must not become `12.5`.
+    Num(String),
     Text(String),
     /// Binary data: its size and the first bytes (for display).
     Blob { len: usize, head: Vec<u8> },
@@ -25,7 +28,7 @@ impl Value {
     }
 
     pub fn is_number(&self) -> bool {
-        matches!(self, Value::Int(_) | Value::Real(_))
+        matches!(self, Value::Int(_) | Value::Real(_) | Value::Num(_))
     }
 
     /// The whole value as text — what Copy puts on the clipboard.
@@ -34,7 +37,7 @@ impl Value {
             Value::Null => "NULL".into(),
             Value::Int(i) => i.to_string(),
             Value::Real(r) => format_real(*r),
-            Value::Text(s) => s.clone(),
+            Value::Num(s) | Value::Text(s) => s.clone(),
             Value::Blob { len, head } => {
                 let hex: String = head.iter().map(|b| format!("{b:02X}")).collect();
                 let more = if *len > head.len() { "…" } else { "" };
@@ -64,14 +67,14 @@ impl Value {
         fn rank(v: &Value) -> u8 {
             match v {
                 Value::Null => 0,
-                Value::Int(_) | Value::Real(_) => 1,
+                Value::Int(_) | Value::Real(_) | Value::Num(_) => 1,
                 Value::Text(_) => 2,
                 Value::Blob { .. } => 3,
             }
         }
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a.cmp(b),
-            (Value::Int(_) | Value::Real(_), Value::Int(_) | Value::Real(_)) => self.as_f64().total_cmp(&other.as_f64()),
+            (Value::Int(_) | Value::Real(_) | Value::Num(_), Value::Int(_) | Value::Real(_) | Value::Num(_)) => self.as_f64().total_cmp(&other.as_f64()),
             (Value::Text(a), Value::Text(b)) => a.cmp(b),
             (Value::Blob { len: a, .. }, Value::Blob { len: b, .. }) => a.cmp(b),
             _ => rank(self).cmp(&rank(other)),
@@ -82,6 +85,7 @@ impl Value {
         match self {
             Value::Int(i) => *i as f64,
             Value::Real(r) => *r,
+            Value::Num(s) => s.parse().unwrap_or(0.),
             _ => 0.,
         }
     }
@@ -105,8 +109,9 @@ mod tests {
         assert_eq!(Value::Text("abcdefghij".into()).display(5), "abcd…");
         assert_eq!(Value::blob(&[0xDE, 0xAD]).to_text(), "0xDEAD (2 bytes)");
         assert!(Value::blob(&[0u8; 100]).to_text().ends_with("00… (100 bytes)"));
-        let mut column = vec![Value::Text("b".into()), Value::Int(10), Value::Null, Value::Real(2.5), Value::Text("a".into())];
+        let mut column = vec![Value::Text("b".into()), Value::Int(10), Value::Null, Value::Num("3.50".into()), Value::Real(2.5), Value::Text("a".into())];
         column.sort_by(Value::sort_cmp);
-        assert_eq!(column, vec![Value::Null, Value::Real(2.5), Value::Int(10), Value::Text("a".into()), Value::Text("b".into())]);
+        assert_eq!(column, vec![Value::Null, Value::Real(2.5), Value::Num("3.50".into()), Value::Int(10), Value::Text("a".into()), Value::Text("b".into())]);
+        assert_eq!(Value::Num("12.50".into()).to_text(), "12.50");
     }
 }
