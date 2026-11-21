@@ -693,15 +693,68 @@ impl FileTree {
                 }
             }
             "delete" if plain => {
-                if let Some(sel) = self.selected.clone() {
+                if let Some(sel) = self.selected.clone().filter(|s| self.in_project(s) && *s != self.root) {
                     let is_dir = sel.is_dir();
                     let position = self.row_anchor(&sel);
                     self.ask_delete(sel, is_dir, position, cx);
                 }
             }
+            _ if !plain || ev.keystroke.modifiers.shift || self.menu.is_some() || self.confirm_delete.is_some() => return,
+            "up" | "down" | "home" | "end" => {
+                let last = self.rows.len().saturating_sub(1);
+                let target = match (key, self.selected_index()) {
+                    ("home", _) | ("up", None) => Some(0),
+                    ("end", _) | ("down", None) => Some(last),
+                    ("up", Some(ix)) => (0..ix).rev().find(|&i| self.rows[i].kind != RowKind::NewItem),
+                    (_, Some(ix)) => (ix + 1..self.rows.len()).find(|&i| self.rows[i].kind != RowKind::NewItem),
+                    _ => None,
+                };
+                if let Some(ix) = target {
+                    let down = matches!(key, "down" | "end");
+                    self.select_index(ix, down, cx);
+                }
+            }
+            "right" | "left" | "enter" | "space" => {
+                let Some(ix) = self.selected_index() else { return };
+                let row = self.rows[ix].clone();
+                match key {
+                    // A closed folder opens; an open one steps to its first child.
+                    "right" if row.is_dir && !row.expanded && row.kind != RowKind::Root => self.toggle(ix, 1, cx),
+                    "right" => {
+                        if self.rows.get(ix + 1).is_some_and(|r| r.depth > row.depth && r.kind != RowKind::NewItem) {
+                            self.select_index(ix + 1, true, cx);
+                        }
+                    }
+                    // An open folder closes; anything else steps up to its parent.
+                    "left" if row.is_dir && row.expanded && row.kind != RowKind::Root => self.toggle(ix, 1, cx),
+                    "left" => {
+                        if let Some(parent) = (0..ix).rev().find(|&i| self.rows[i].depth < row.depth) {
+                            self.select_index(parent, false, cx);
+                        }
+                    }
+                    // Enter opens a file in the editor (Space only previews it); on a folder
+                    // both open or close it.
+                    "enter" => self.toggle(ix, 2, cx),
+                    _ => self.toggle(ix, 1, cx),
+                }
+            }
             _ => return,
         }
         cx.stop_propagation();
+    }
+
+    /// The row of the selection, if it is shown.
+    fn selected_index(&self) -> Option<usize> {
+        let sel = self.selected.as_ref()?;
+        self.rows.iter().position(|r| &r.path == sel && r.kind != RowKind::NewItem)
+    }
+
+    /// Select row `ix` from the keyboard and scroll it into view (from below when moving down).
+    fn select_index(&mut self, ix: usize, down: bool, cx: &mut Context<Self>) {
+        let Some(row) = self.rows.get(ix) else { return };
+        self.selected = Some(row.path.clone());
+        self.scroll.scroll_to_item(ix, if down { gpui::ScrollStrategy::Bottom } else { gpui::ScrollStrategy::Top });
+        cx.notify();
     }
 
     /// Where to show a popup for `path` when there was no click (keyboard): near its row.

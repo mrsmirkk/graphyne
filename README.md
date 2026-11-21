@@ -120,7 +120,8 @@ single portable `.exe`.
 
 ### Databases
 - A **Database** panel (right side): connections → tables and views → columns with types and
-  primary keys. **PostgreSQL** and **MySQL / MariaDB** servers (host, port, database, user, SSL
+  primary keys; opened branches are remembered between sessions. **PostgreSQL** and **MySQL /
+  MariaDB** servers (host, port, database, user, SSL
   mode, Test Connection; tables of other schemas shown as `schema.table`) and **SQLite**, which is
   built in — opening a `.db` / `.sqlite` file from the project tree adds it.
 - **Passwords are kept in the Windows Credential Manager**, never in Graphyne's files.
@@ -145,6 +146,9 @@ single portable `.exe`.
   (`src/utils/io.py` creates the folders too), `F2` renames, `Delete` moves to the **Recycle Bin**
   after a confirmation, and open tabs follow renamed files and folders. A single click previews a
   file and keeps the keyboard in the tree; a double click moves it to the editor.
+- **Keyboard in the project tree**: `↑` / `↓`, `Home` / `End` move the selection, `→` opens a
+  folder or steps into it, `←` closes it or steps up to the parent, `Enter` opens a file in the
+  editor, `Space` previews it.
 - **Drag and drop** in the tree moves files and folders (the target folder is highlighted; open
   tabs follow). Files and folders dropped from Explorer are **copied** into the project.
 - A **File menu** (☰ at the left of the title bar): New File / Folder, Open File, Open Folder,
@@ -207,6 +211,7 @@ tells you when something is missing.
 | All actions | `Ctrl+Shift+O` |
 | Find in Files | `Ctrl+Shift+F` |
 | Project tree: rename / delete to the Recycle Bin | `F2` / `Delete` |
+| Project tree: move / open or close a folder / open a file | `↑` `↓` / `→` `←` / `Enter` |
 | New file / open file | `Alt+Insert` / `Ctrl+O` |
 | Settings | `Ctrl+,` |
 | Run current file | `Shift+F10` (or `Ctrl+R`) |

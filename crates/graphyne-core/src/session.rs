@@ -98,6 +98,8 @@ pub struct ProjectState {
     pub active_tab: usize,
     /// Expanded folders of the file tree (besides the project root).
     pub expanded: Vec<PathBuf>,
+    /// Expanded nodes of the Database panel: connections, groups, tables.
+    pub db_expanded: Vec<String>,
 }
 
 impl Default for ProjectState {
@@ -116,6 +118,7 @@ impl Default for ProjectState {
             tabs: Vec::new(),
             active_tab: 0,
             expanded: Vec::new(),
+            db_expanded: Vec::new(),
         }
     }
 }
@@ -211,6 +214,7 @@ mod tests {
             ],
             active_tab: 1,
             expanded: vec![root.join("src")],
+            db_expanded: vec!["c/shop".into(), "g/shop/tables".into()],
             ..Default::default()
         };
         save_project(&state).unwrap();

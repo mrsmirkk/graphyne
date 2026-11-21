@@ -428,6 +428,7 @@ impl Workspace {
         self.right_width = px(s.right_width.clamp(180., 1200.));
         self.bottom_height = px(s.bottom_height.clamp(80., 1400.));
         self.file_tree.update(cx, |t, cx| t.restore_expanded(s.expanded, cx));
+        self.db_panel.update(cx, |p, cx| p.restore_expanded(s.db_expanded, cx));
         self.pane.update(cx, |p, cx| p.restore(s.tabs, s.active_tab, window, cx));
     }
 
@@ -469,6 +470,7 @@ impl Workspace {
             tabs,
             active_tab,
             expanded: self.file_tree.read(cx).expanded_dirs(),
+            db_expanded: self.db_panel.read(cx).expanded_keys(cx),
         }
     }
 

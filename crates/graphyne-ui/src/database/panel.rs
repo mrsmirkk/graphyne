@@ -61,6 +61,9 @@ pub struct DatabasePanel {
     selected: Option<String>,
     scroll: UniformListScrollHandle,
     menu: Option<(MenuTarget, Point<Pixels>)>,
+    /// Connections left open last time load their schemas once the panel is first shown,
+    /// not at startup.
+    restored: bool,
     _sub: gpui::Subscription,
 }
 
@@ -75,7 +78,37 @@ impl Focusable for DatabasePanel {
 impl DatabasePanel {
     pub fn new(store: Entity<DbStore>, cx: &mut Context<Self>) -> Self {
         let sub = cx.observe(&store, |_, _, cx| cx.notify());
-        Self { focus_handle: cx.focus_handle(), store, expanded: HashSet::new(), selected: None, scroll: UniformListScrollHandle::new(), menu: None, _sub: sub }
+        Self { focus_handle: cx.focus_handle(), store, expanded: HashSet::new(), selected: None, scroll: UniformListScrollHandle::new(), menu: None, restored: false, _sub: sub }
+    }
+
+    /// The expanded nodes, to restore next time (only those of existing connections).
+    pub fn expanded_keys(&self, cx: &App) -> Vec<String> {
+        let mut keys: Vec<String> = self.expanded.iter().filter(|k| self.known(k, cx)).cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    /// Whether `key` belongs to a connection that still exists.
+    fn known(&self, key: &str, cx: &App) -> bool {
+        let id = key.split_once('/').and_then(|(_, rest)| rest.split('/').next());
+        id.is_some_and(|id| self.store.read(cx).entry(id).is_some())
+    }
+
+    pub fn restore_expanded(&mut self, keys: Vec<String>, cx: &mut Context<Self>) {
+        self.expanded = keys.into_iter().filter(|k| self.known(k, cx)).collect();
+        self.restored = self.expanded.iter().any(|k| k.starts_with("c/"));
+        cx.notify();
+    }
+
+    /// Load the schemas of the connections that were left open.
+    fn load_restored(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.expanded.iter().filter_map(|k| k.strip_prefix("c/")).map(str::to_string).collect();
+        for id in ids {
+            let needs_schema = self.store.read(cx).entry(&id).is_some_and(|e| e.schema.is_none() && !e.loading_schema);
+            if needs_schema {
+                self.store.update(cx, |s, cx| s.load_schema(&id, cx));
+            }
+        }
     }
 
     /// Show connection `id` opened up (after adding or opening a database file).
@@ -434,6 +467,9 @@ impl DatabasePanel {
 
 impl Render for DatabasePanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.restored) {
+            cx.spawn(async move |this, cx| this.update(cx, |this, cx| this.load_restored(cx)).ok()).detach();
+        }
         let rows = self.rows(cx);
         let empty = self.store.read(cx).entries.is_empty();
         let selected = self.selected.clone();
