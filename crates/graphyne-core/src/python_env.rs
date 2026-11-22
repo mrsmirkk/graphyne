@@ -282,11 +282,12 @@ pub fn install_package_command(root: &Path, python: &Path) -> (PathBuf, Vec<Stri
 /// Python versions offered for "Install Python 3.x" (uv downloads them).
 pub const PYTHON_VERSIONS: [&str; 4] = ["3.13", "3.12", "3.11", "3.10"];
 
-/// Install a Python version with uv (into uv's own folder, not the system).
+/// Install a Python version with uv, into uv's own folder only: no `python3.x.exe` on PATH
+/// (`--no-bin`) and no Windows registry entry (`--no-registry`) — Graphyne finds it through uv.
 pub fn install_python(version: &str, progress: &dyn Fn(Step)) -> Result<(), String> {
     let uv = get_uv(progress)?;
     progress(Step::InstallingPython);
-    run(command(&uv).args(["python", "install", version]), &format!("installing Python {version}"))
+    run(command(&uv).args(["python", "install", "--no-bin", "--no-registry", version]), &format!("installing Python {version}"))
 }
 
 /// Pythons uv installed (`uv python install`), for the interpreter list.
