@@ -47,8 +47,107 @@ pub fn resolve(file: &Path, root: &Path) -> Result<Resolved, String> {
         LanguageId::Rust => rust(file, root, &title),
         LanguageId::C | LanguageId::Cpp => native(file, &dir, &title, lang),
         LanguageId::Go => go(file, &dir, &title),
+        LanguageId::JavaScript | LanguageId::TypeScript => node(file, &dir, &title),
         other => Err(format!("No debugger configured for {} yet", other.name())),
     }
+}
+
+/// The js-debug release Graphyne downloads on first use (Microsoft, MIT), and its SHA-256.
+const JS_DEBUG_VERSION: &str = "1.140.1";
+const JS_DEBUG_SHA256: &str = "c72fab31bcbfdce6ad1f42adfd28eff8d4681dd3b03b5e2e6f9e72e6f9927faf";
+
+/// A Windows system tool by full path: `tar` and `curl` from Git or MSYS on PATH take
+/// `C:\…` for a remote host.
+fn system_tool(name: &str) -> PathBuf {
+    if cfg!(windows) {
+        let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        root.join("System32").join(format!("{name}.exe"))
+    } else {
+        PathBuf::from(name)
+    }
+}
+
+fn sha256_hex(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
+}
+
+/// `dapDebugServer.js` of js-debug: `GRAPHYNE_JS_DEBUG_PATH` (the unpacked `js-debug` folder or
+/// the script itself), else Graphyne's copy, downloaded and checked on first use.
+fn js_debug_server() -> Result<PathBuf, String> {
+    if let Some(p) = std::env::var_os("GRAPHYNE_JS_DEBUG_PATH").map(PathBuf::from) {
+        let script = if p.is_dir() { p.join("src").join("dapDebugServer.js") } else { p };
+        return if script.is_file() { Ok(script) } else { Err(format!("GRAPHYNE_JS_DEBUG_PATH: {} not found", script.display())) };
+    }
+    let dir = graphyne_core::session::state_dir().ok_or("no folder for Graphyne's state")?.join("adapters").join(format!("js-debug-{JS_DEBUG_VERSION}"));
+    let script = dir.join("js-debug").join("src").join("dapDebugServer.js");
+    if script.is_file() {
+        return Ok(script);
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let archive = dir.join("js-debug.tar.gz.part");
+    let url = format!("https://github.com/microsoft/vscode-js-debug/releases/download/v{JS_DEBUG_VERSION}/js-debug-dap-v{JS_DEBUG_VERSION}.tar.gz");
+    let failed = |what: &str| format!("Could not download the JavaScript debugger (js-debug {JS_DEBUG_VERSION}) from {url}: {what}. Check the connection, or unpack it yourself and set GRAPHYNE_JS_DEBUG_PATH");
+    let out = hidden_command(&system_tool("curl").to_string_lossy())
+        .args(["-fsSL", "--retry", "2", "--connect-timeout", "15", "-o"])
+        .arg(&archive)
+        .arg(&url)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| failed(&e.to_string()))?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&archive);
+        return Err(failed(String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    let hash = sha256_hex(&archive)?;
+    if hash != JS_DEBUG_SHA256 {
+        let _ = std::fs::remove_file(&archive);
+        return Err(failed(&format!("the file's SHA-256 is {hash}, expected {JS_DEBUG_SHA256}")));
+    }
+    // Unpack next to the final place, then move it in: a broken unpack leaves nothing behind.
+    let staging = dir.join("unpacking");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    let out = hidden_command(&system_tool("tar").to_string_lossy())
+        .arg("-xzf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&staging)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("tar: {e}"))?;
+    let _ = std::fs::remove_file(&archive);
+    if !out.status.success() {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("unpacking js-debug failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    std::fs::rename(staging.join("js-debug"), dir.join("js-debug")).map_err(|e| format!("installing js-debug: {e}"))?;
+    let _ = std::fs::remove_dir_all(&staging);
+    if script.is_file() { Ok(script) } else { Err("the js-debug archive has no src/dapDebugServer.js".into()) }
+}
+
+/// Node.js through js-debug, which runs as a DAP server on a TCP port. The program runs in a
+/// terminal tab; js-debug attaches to it in a child session (`startDebugging`). TypeScript
+/// runs as is on Node ≥ 23.6 (types are stripped without moving code, so lines match).
+fn node(file: &Path, dir: &Path, title: &str) -> Result<Resolved, String> {
+    let node = which("node").ok_or("Node.js not found on PATH (install it from https://nodejs.org)")?;
+    let server = js_debug_server()?;
+    let port = free_port().ok_or("no free TCP port")?;
+    Ok(Resolved {
+        name: "js-debug",
+        adapter_id: "pwa-node",
+        program: node.clone(),
+        args: vec![server.to_string_lossy().to_string(), port.to_string(), "127.0.0.1".into()],
+        env: Vec::new(),
+        transport: Transport::Tcp { port },
+        cwd: dir.to_path_buf(),
+        launch: json!({
+            "type": "pwa-node", "request": "launch", "name": format!("Graphyne: {title}"),
+            "program": file, "cwd": dir, "runtimeExecutable": node,
+            "console": "integratedTerminal", "skipFiles": ["<node_internals>/**"]
+        }),
+    })
 }
 
 fn python(file: &Path, dir: &Path, title: &str, root: &Path) -> Result<Resolved, String> {

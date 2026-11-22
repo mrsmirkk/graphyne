@@ -73,7 +73,12 @@ impl Render for DebugPanel {
             Status::Starting(m) => (m.clone(), c::YELLOW),
             Status::Running => ("Running".to_string(), c::GREEN),
             Status::Paused { reason, description } => (
-                format!("Paused: {}", description.clone().unwrap_or_else(|| reason.clone())),
+                // js-debug says "Paused on breakpoint" itself; debugpy only gives a reason.
+                match description {
+                    Some(d) if d.to_lowercase().starts_with("paused") => d.clone(),
+                    Some(d) => format!("Paused: {d}"),
+                    None => format!("Paused: {reason}"),
+                },
                 c::YELLOW,
             ),
             Status::Exited(code) => (format!("Exited with code {code}"), c::TEXT_DIM),

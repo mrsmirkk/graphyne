@@ -54,6 +54,7 @@ mysql = { version = "28", features = ["native-tls"] }
 keyring = "4"
 memmap2 = "0.9"
 dirs = "6"
+sha2 = "0.10"
 regex = "1"
 ignore = "0.4"
 notify = "8"

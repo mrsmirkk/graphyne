@@ -39,6 +39,12 @@ pub fn probe(lang: LanguageId) -> Option<String> {
     Some(format!("{label} {version}"))
 }
 
+/// What runs a `.ts` file: Bun when it is installed, else Node.js, which strips the types
+/// itself since version 23.6 (`.tsx` still needs Bun).
+pub fn typescript_runner() -> &'static str {
+    if which("bun").is_some() || which("node").is_none() { "bun" } else { "node" }
+}
+
 /// A program on PATH (on Windows also `.exe` / `.cmd` / `.bat`), or in `~/.cargo/bin`.
 pub fn which(program: &str) -> Option<std::path::PathBuf> {
     let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
@@ -82,7 +88,8 @@ pub fn run_program(lang: LanguageId, file: &std::path::Path, root: &std::path::P
         LanguageId::Cpp => "g++",
         LanguageId::Python => "python",
         LanguageId::Go => "go",
-        LanguageId::TypeScript | LanguageId::Tsx => "bun",
+        LanguageId::TypeScript => typescript_runner(),
+        LanguageId::Tsx => "bun",
         LanguageId::JavaScript => "node",
         LanguageId::CSharp => "dotnet",
         LanguageId::Java => "java",

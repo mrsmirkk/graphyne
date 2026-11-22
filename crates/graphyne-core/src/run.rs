@@ -86,6 +86,7 @@ pub fn plan(file: &Path, project_root: &Path, shell: ShellKind) -> RunPlan {
             Some(m) => pty("go run .", m, "go run .".into()),
             None => pty(&name, dir, format!("go run {f}")),
         },
+        LanguageId::TypeScript if crate::toolchain::typescript_runner() == "node" => pty(&name, dir, format!("node {f}")),
         LanguageId::TypeScript | LanguageId::Tsx => pty(&name, dir, format!("bun run {f}")),
         LanguageId::JavaScript => pty(&name, dir, format!("node {f}")),
         LanguageId::CSharp => pty("dotnet run", dir, "dotnet run".into()),

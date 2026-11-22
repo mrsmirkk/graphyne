@@ -43,11 +43,17 @@ pub fn parse_threads(body: &Value) -> Vec<Thread> {
         .unwrap_or_default()
 }
 
+/// The frames of a `stackTrace` response. Frames the adapter marks as not the user's (js-debug:
+/// Node internals and `skipFiles`) are left out, except the top one.
 pub fn parse_stack(body: &Value) -> Vec<StackFrame> {
+    let hidden = |f: &Value| f["source"]["presentationHint"] == "deemphasize" || f["presentationHint"] == "subtle";
     body["stackFrames"]
         .as_array()
         .map(|a| {
             a.iter()
+                .enumerate()
+                .filter(|(i, f)| *i == 0 || !hidden(f))
+                .map(|(_, f)| f)
                 .filter_map(|f| {
                     Some(StackFrame {
                         id: f["id"].as_i64()?,
@@ -135,6 +141,16 @@ pub fn source_breakpoints<'a>(specs: impl IntoIterator<Item = &'a BreakpointSpec
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn hides_frames_the_adapter_deemphasizes() {
+        let internal = |id: i64| json!({ "id": id, "name": "load", "line": 1, "source": { "name": "loader", "presentationHint": "deemphasize" } });
+        let user = json!({ "id": 2, "name": "main", "line": 7, "source": { "path": "/p/app.js" } });
+        let ids = |frames: Vec<StackFrame>| frames.into_iter().map(|f| f.id).collect::<Vec<_>>();
+        assert_eq!(ids(parse_stack(&json!({ "stackFrames": [user.clone(), internal(3), internal(4)] }))), [2]);
+        // Paused inside Node itself: the top frame stays.
+        assert_eq!(ids(parse_stack(&json!({ "stackFrames": [internal(1), user, internal(3)] }))), [1, 2]);
+    }
 
     #[test]
     fn parses_stack_and_variables() {

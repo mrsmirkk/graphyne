@@ -43,7 +43,7 @@ single portable `.exe`.
 - **Run anything with one key** — `Shift+F10` runs the current file in ~20 languages; HTML gets a
   live-reloading preview.
 - **Real debugger** — breakpoints, conditions, logpoints, inline values, variables and an
-  evaluation console over the Debug Adapter Protocol.
+  evaluation console over the Debug Adapter Protocol, for Python and JavaScript / TypeScript.
 - **Zero-setup Python** — create a `.py` file and Graphyne makes a `.venv` with `debugpy` in it,
   so Run and Debug just work.
 - **Tells you what's missing** — no `g++`, no JDK, no Go? Graphyne says what to install instead of
@@ -93,7 +93,7 @@ single portable `.exe`.
 ### Run
 - **One-click Run** (`Shift+F10`) for Rust (Cargo or single files), C/C++, Python, Go,
   JavaScript/TypeScript, C#, Java, Kotlin, PHP, Dart, Lua, Ruby, Scala, Swift and shell scripts —
-  each in its own terminal tab.
+  each in its own terminal tab. TypeScript runs with Bun, or with Node.js when Bun is not installed.
 - **Live preview** for HTML/CSS: a local server on `127.0.0.1` that reloads the page on every save.
 - **Run presets** for auditing and reverse engineering: `cargo audit`, `clippy`, `nmap`,
   `gobuster`, `valgrind`, `strace`, `gdb` (only the installed ones are enabled).
@@ -105,6 +105,10 @@ single portable `.exe`.
   per project), step over / into / out, pause, restart, **inline variable values**, call stack,
   variables tree and an evaluation console. The program runs in a terminal tab, so it can read input.
 - **Python** via `debugpy` — fully supported and tested.
+- **JavaScript and TypeScript** on Node.js via Microsoft's `js-debug` — tested with Node 24.
+  Graphyne downloads `js-debug` (about 1 MB, checked against a pinned SHA-256) on the first
+  debug session; `.ts` files run as is on Node 23.6 or newer. Node's own frames are hidden from the
+  call stack.
 - Rust, C and C++ via `lldb-dap` / CodeLLDB / `gdb`, Go via `dlv` — wired up, not yet verified.
 
 ### Python projects
@@ -190,8 +194,8 @@ Planned, roughly in this order:
 - [ ] **Databases, next steps** — SSH tunnels, editing query results (not only table tabs)
       (connections, the schema browser, the SQL console, editing, export and CSV import are done).
 - [ ] **Keymap editor** in Settings.
-- [ ] **Debugging beyond Python** verified end to end: Rust / C / C++ (`lldb-dap`), Go (`delve`),
-      JavaScript / TypeScript.
+- [ ] **Debugging beyond Python and JavaScript** verified end to end: Rust / C / C++ (`lldb-dap`),
+      Go (`delve`).
 - [ ] **Python**: dependencies from `pyproject.toml` (uv, Poetry, PDM) and an interpreter picker.
 - [ ] **macOS and Linux** builds (GPUI supports both; Graphyne isn't tested there yet).
 - [ ] **Faster start-up** — most of today's ~0.4 s goes to Direct3D initialization.

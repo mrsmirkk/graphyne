@@ -464,6 +464,10 @@ impl Debugger {
                         let req = client.request("disconnect", json!({ "terminateDebuggee": true }));
                         cx.background_spawn(async move {
                             let _ = req.await;
+                            // Adapters serving over TCP (js-debug) keep running after the
+                            // session: end the process once the last output has arrived.
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            client.kill();
                         })
                         .detach();
                     }

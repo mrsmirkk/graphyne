@@ -30,6 +30,10 @@
   используют этот `.venv`. Если есть `requirements.txt`, Graphyne спрашивает, установить ли пакеты
   (Install / Not now / Don't ask again) — без согласия ничего не ставит; после изменения файла
   спросит снова. Проекты Poetry / Pipenv / conda не трогает. Выключается в Settings → Run & Debug.
+- **Отладка JavaScript и TypeScript** — нужен Node.js. При первой отладке Graphyne скачивает
+  отладчик Microsoft `js-debug` (около 1 МБ, сверяет SHA-256) в свою папку в `%APPDATA%\Graphyne`;
+  без интернета можно распаковать его самому и указать путь в переменной `GRAPHYNE_JS_DEBUG_PATH`.
+  Файлы `.ts` запускаются как есть на Node 23.6 и новее. Внутренние кадры Node в стеке скрыты.
 - **Отладка Rust / C / C++ / Go** — `lldb-dap` или CodeLLDB, `gdb` ≥ 14, `dlv` (не проверено).
 
 ## Горячие клавиши
