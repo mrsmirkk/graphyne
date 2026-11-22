@@ -18,6 +18,7 @@ mod keymap;
 mod lsp_store;
 mod lua_bridge;
 mod panels;
+mod plugin_install;
 mod plugins_page;
 mod search_everywhere;
 mod settings_page;

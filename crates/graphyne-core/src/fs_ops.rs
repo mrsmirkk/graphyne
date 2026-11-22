@@ -109,6 +109,11 @@ pub fn copy_into(src: &Path, dir: &Path) -> Result<PathBuf, String> {
     Ok(to)
 }
 
+/// Copy the folder `from` (with everything in it) to `to`.
+pub fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    copy_recursive(from, to)
+}
+
 fn copy_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
     if std::fs::symlink_metadata(from)?.is_dir() {
         std::fs::create_dir_all(to)?;

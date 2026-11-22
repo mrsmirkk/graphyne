@@ -240,7 +240,7 @@ Planned, roughly in this order:
       Go (`delve`).
 - [ ] **macOS and Linux** builds (GPUI supports both; Graphyne isn't tested there yet).
 - [ ] **Faster start-up** — most of today's ~0.4 s goes to Direct3D initialization.
-- [ ] Easier extension install (from a URL or a gallery).
+- [ ] An extension gallery (install from a URL).
 
 Have an idea? Open an issue.
 
@@ -292,6 +292,12 @@ An extension is a folder in `plugins\` next to `graphyne.exe` with a `plugin.jso
 `init.lua`. Graphyne picks up new and changed extensions immediately — no restart. The
 **Plugins** page (the `+` in the left panel, or the main menu) lists them, turns them on and off and
 manages their permissions.
+
+**Install from file…** / **From folder…** on that page install one from a `.zip` (a download of
+the folder, a GitHub "Download ZIP" too) or a folder: Graphyne shows its name, version, author and
+the permissions it asks for — all off unless you tick them — and copies it in only when you click
+Install. Installing it again updates it (the old version goes to the Recycle Bin; what you allowed
+stays).
 
 ```lua
 -- plugins/hello/init.lua
