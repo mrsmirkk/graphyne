@@ -2714,7 +2714,7 @@ dependencies = [
 
 [[package]]
 name = "graphyne"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "embed-resource",
  "graphyne-ui",
@@ -2723,7 +2723,7 @@ dependencies = [
 
 [[package]]
 name = "graphyne-core"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -2741,7 +2741,7 @@ dependencies = [
 
 [[package]]
 name = "graphyne-dap"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -2756,7 +2756,7 @@ dependencies = [
 
 [[package]]
 name = "graphyne-db"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "flume 0.12.0",
  "keyring",
@@ -2773,7 +2773,7 @@ dependencies = [
 
 [[package]]
 name = "graphyne-git"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "anyhow",
  "git2",
@@ -2783,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "graphyne-lsp"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -2798,7 +2798,7 @@ dependencies = [
 
 [[package]]
 name = "graphyne-lua"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "dirs 6.0.0",
  "flume 0.12.0",
@@ -2810,7 +2810,7 @@ dependencies = [
 
 [[package]]
 name = "graphyne-syntax"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "graphyne-core",
  "libloading",
@@ -2845,7 +2845,7 @@ dependencies = [
 
 [[package]]
 name = "graphyne-terminal"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -2857,7 +2857,7 @@ dependencies = [
 
 [[package]]
 name = "graphyne-ui"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 dependencies = [
  "anyhow",
  "env_logger",
