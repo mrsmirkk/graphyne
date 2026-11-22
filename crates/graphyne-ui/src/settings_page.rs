@@ -4,12 +4,13 @@
 use crate::app_settings;
 use crate::assets::Icon;
 use crate::components::icon;
+use crate::keymap;
 use crate::lua_bridge;
 use crate::theme::{self, c, color, color_a};
 use crate::text_input::{TextInput, TextInputEvent};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable, SharedString, Subscription, UniformListScrollHandle, Window, anchored,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, Keystroke, SharedString, Subscription, UniformListScrollHandle, Window, anchored,
     deferred, div, px, uniform_list,
 };
 use graphyne_core::settings::{AUTOSAVE_DELAYS_MS, Settings};
@@ -64,6 +65,13 @@ pub struct SettingsPage {
     picker: Option<FontPicker>,
     /// When a dropdown was closed by a click outside it (that click must not reopen it).
     picker_closed: Option<(FontTarget, Instant)>,
+    /// Filters the Keymap section.
+    keymap_query: Entity<TextInput>,
+    /// The command whose new shortcut is being recorded, and which of its shortcuts it replaces.
+    recording: Option<(&'static str, Option<usize>)>,
+    /// Takes keystrokes before any shortcut acts on them while recording.
+    intercept: Option<Subscription>,
+    _query_sub: Subscription,
 }
 
 impl Focusable for SettingsPage {
@@ -74,7 +82,270 @@ impl Focusable for SettingsPage {
 
 impl SettingsPage {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        Self { focus_handle: cx.focus_handle(), shells: graphyne_terminal::available_shells(), picker: None, picker_closed: None }
+        let keymap_query = cx.new(|cx| TextInput::new("Search commands or shortcuts", cx));
+        let query_sub = cx.subscribe(&keymap_query, |_, input, ev: &TextInputEvent, cx| match ev {
+            TextInputEvent::Changed(_) => cx.notify(),
+            TextInputEvent::Cancel => input.update(cx, |i, cx| i.set_text("", cx)),
+            _ => {}
+        });
+        Self {
+            focus_handle: cx.focus_handle(),
+            shells: graphyne_terminal::available_shells(),
+            picker: None,
+            picker_closed: None,
+            keymap_query,
+            recording: None,
+            intercept: None,
+            _query_sub: query_sub,
+        }
+    }
+
+    /// Record the next keystroke as a shortcut of `id` (replacing its shortcut `replace`).
+    fn start_recording(&mut self, id: &'static str, replace: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.stop_recording(cx);
+        self.recording = Some((id, replace));
+        window.focus(&self.focus_handle);
+        let page = cx.entity().downgrade();
+        self.intercept = Some(cx.intercept_keystrokes(move |ev, _, cx| {
+            let Some(page) = page.upgrade() else { return };
+            // No shortcut acts on this keystroke: it is the one being recorded.
+            cx.stop_propagation();
+            let keystroke = ev.keystroke.clone();
+            page.update(cx, |p, cx| p.recorded(&keystroke, cx));
+        }));
+        cx.notify();
+    }
+
+    fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        self.recording = None;
+        // The interceptor may be running right now: drop it once this keystroke is handled.
+        if let Some(sub) = self.intercept.take() {
+            cx.defer(move |_| drop(sub));
+        }
+        cx.notify();
+    }
+
+    fn recorded(&mut self, k: &Keystroke, cx: &mut Context<Self>) {
+        let Some((id, replace)) = self.recording else { return };
+        if k.key == "escape" && !k.modifiers.modified() {
+            self.stop_recording(cx);
+            return;
+        }
+        // A lone modifier: wait for the key that goes with it.
+        let Some(keys) = keymap::from_keystroke(k) else { return };
+        self.stop_recording(cx);
+        let Some(cmd) = keymap::command(id) else { return };
+        app_settings::update(cx, |s| {
+            let mut all = cmd.keys(s);
+            match replace {
+                Some(i) if i < all.len() => all[i] = keys.clone(),
+                _ => all.push(keys.clone()),
+            }
+            let mut seen = std::collections::HashSet::new();
+            all.retain(|k| seen.insert(k.to_lowercase()));
+            keymap::set_keys(s, id, all);
+        });
+    }
+
+    fn remove_shortcut(id: &'static str, ix: usize, cx: &mut App) {
+        let Some(cmd) = keymap::command(id) else { return };
+        app_settings::update(cx, |s| {
+            let mut all = cmd.keys(s);
+            if ix < all.len() {
+                all.remove(ix);
+            }
+            keymap::set_keys(s, id, all);
+        });
+    }
+
+    /// Take `keys` away from the commands that share it with `id`.
+    fn remove_elsewhere(id: &'static str, keys: String, cx: &mut App) {
+        let Some(cmd) = keymap::command(id) else { return };
+        app_settings::update(cx, |s| {
+            let bare = keys.split('@').next().unwrap_or(&keys).to_lowercase();
+            for other in keymap::conflicts(cmd, &keys, s) {
+                let rest: Vec<String> = other.keys(s).into_iter().filter(|k| k.split('@').next().unwrap_or(k).to_lowercase() != bare).collect();
+                keymap::set_keys(s, other.id, rest);
+            }
+        });
+    }
+
+    /// Settings → Keymap: every command with its shortcuts, filtered by the search box.
+    fn keymap_section(&self, s: &Settings, cx: &mut Context<Self>) -> AnyElement {
+        let query = self.keymap_query.read(cx).text().trim().to_lowercase();
+        let key_query = query.replace('-', "+");
+        let matches = |cmd: &keymap::Command| {
+            query.is_empty() || cmd.label.to_lowercase().contains(&query) || cmd.keys(s).iter().any(|k| keymap::label(k).to_lowercase().contains(&key_query))
+        };
+        let changed = keymap::COMMANDS.iter().filter(|c| c.is_changed(s)).count();
+        let search = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .w(px(320.))
+            .h(px(30.))
+            .px(px(10.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(color(c::POPUP_BORDER))
+            .bg(color(c::POPUP))
+            .child(icon(Icon::Search, 13., color(c::TEXT_DIM)))
+            .child(div().flex_1().child(self.keymap_query.clone()));
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .pb(px(4.))
+            .child(search)
+            .child(div().flex_1())
+            .when(changed > 0, |d| {
+                d.child(div().text_size(px(11.5)).text_color(color(c::TEXT_DIM)).child(format!("{changed} changed")))
+                    .child(small_button("keymap-reset-all", "Reset shortcuts").on_click(|_, _, cx| app_settings::update(cx, |s| s.keymap.clear())))
+            });
+        let mut body = div().flex().flex_col().child(header);
+        let mut any = false;
+        for group in keymap::GROUPS {
+            let rows: Vec<(usize, &'static keymap::Command)> = keymap::COMMANDS.iter().enumerate().filter(|(_, c)| c.group == *group && matches(c)).collect();
+            if rows.is_empty() {
+                continue;
+            }
+            any = true;
+            let mut group_card = card();
+            for (n, (ix, cmd)) in rows.into_iter().enumerate() {
+                group_card = group_card.child(self.keymap_row(n == 0, ix, cmd, s, cx));
+            }
+            body = body.child(div().pt(px(12.)).pb(px(6.)).text_size(px(11.5)).text_color(color(c::TEXT_DIM)).child(*group)).child(group_card);
+        }
+        if !any {
+            body = body.child(div().py(px(16.)).text_color(color(c::TEXT_DIM)).child("No command or shortcut matches."));
+        }
+        // As tall as a screen however few commands match, so the page doesn't scroll away from
+        // the search box while typing.
+        body.min_h(px(1000.)).into_any_element()
+    }
+
+    fn keymap_row(&self, first: bool, ix: usize, cmd: &'static keymap::Command, s: &Settings, cx: &mut Context<Self>) -> AnyElement {
+        let id = cmd.id;
+        let keys = cmd.keys(s);
+        let recording = self.recording.filter(|(r, _)| *r == id).map(|(_, replace)| replace);
+        let mut chips = div().flex().flex_wrap().items_center().justify_end().gap(px(6.));
+        for (k, key) in keys.iter().enumerate() {
+            if recording == Some(Some(k)) {
+                chips = chips.child(recording_chip(("km-rec", ix), cx));
+                continue;
+            }
+            let chip = div()
+                .id(("km-key", ix * 16 + k))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .h(px(26.))
+                .pl(px(9.))
+                .pr(px(4.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(color(c::POPUP_BORDER))
+                .bg(color(c::ISLAND))
+                .cursor_pointer()
+                .hover(|d| d.border_color(color(c::ACCENT)))
+                .child(div().text_size(px(12.)).text_color(color(c::TEXT)).child(keymap::label(key)))
+                .child(
+                    div()
+                        .id(("km-del", ix * 16 + k))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(16.))
+                        .rounded(px(4.))
+                        .hover(|d| d.bg(color(c::HOVER)))
+                        .child(icon(Icon::Close, 10., color(c::TEXT_DIM)))
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            Self::remove_shortcut(id, k, cx);
+                        }),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| this.start_recording(id, Some(k), window, cx)));
+            chips = chips.child(chip);
+        }
+        if recording == Some(None) {
+            chips = chips.child(recording_chip(("km-rec", ix), cx));
+        }
+        let add = div()
+            .id(("km-add", ix))
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(26.))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .hover(|d| d.bg(color(c::HOVER)))
+            .child(icon(Icon::Plus, 13., color(c::TEXT_MUTED)))
+            .on_click(cx.listener(move |this, _, window, cx| this.start_recording(id, None, window, cx)));
+        let changed = cmd.is_changed(s);
+        let reset = div()
+            .id(("km-reset", ix))
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(26.))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .hover(|d| d.bg(color(c::HOVER)))
+            .child(icon(Icon::Refresh, 13., color(c::TEXT_MUTED)))
+            .on_click(move |_, _, cx| {
+                if let Some(cmd) = keymap::command(id) {
+                    app_settings::update(cx, |s| keymap::set_keys(s, id, cmd.default_keys()));
+                }
+            });
+        // Shortcuts another command uses where this one works too.
+        let clashes: Vec<(String, Vec<&'static str>)> = keys
+            .iter()
+            .filter_map(|k| {
+                let others = keymap::conflicts(cmd, k, s);
+                (!others.is_empty()).then(|| (k.clone(), others.iter().map(|o| o.label).collect()))
+            })
+            .collect();
+        let mut label = div().flex().flex_col().flex_1().min_w(px(0.)).gap(px(2.)).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(div().text_color(color(c::TEXT)).child(cmd.label))
+                .when(changed, |d| d.child(div().text_size(px(11.)).text_color(color(c::ACCENT)).child("changed"))),
+        );
+        for (n, (keys, others)) in clashes.into_iter().enumerate() {
+            let take = keys.clone();
+            label = label.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(px(11.5))
+                    .child(div().text_color(color(c::YELLOW)).child(format!("{} is also used by {}", keymap::label(&keys), others.join(", "))))
+                    .child(
+                        div()
+                            .id(("km-take", ix * 16 + n))
+                            .cursor_pointer()
+                            .text_color(color(c::ACCENT))
+                            .hover(|d| d.underline())
+                            .child("Remove there")
+                            .on_click(move |_, _, cx| Self::remove_elsewhere(id, take.clone(), cx)),
+                    ),
+            );
+        }
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(16.))
+            .py(px(8.))
+            .min_h(px(44.))
+            .when(!first, |d| d.border_t_1().border_color(color(c::BORDER)))
+            .child(label)
+            .child(chips)
+            .child(add)
+            .child(div().size(px(26.)).when(changed, |d| d.child(reset)))
+            .into_any_element()
     }
 
     fn toggle_picker(&mut self, target: FontTarget, window: &mut Window, cx: &mut Context<Self>) {
@@ -307,6 +578,42 @@ fn choice_row(first: bool, label: &'static str, help: &'static str, chips: Vec<A
         .child(div().flex().flex_wrap().gap(px(6.)).children(chips))
 }
 
+/// The chip that waits for a shortcut; a click elsewhere cancels.
+fn recording_chip(id: impl Into<gpui::ElementId>, cx: &mut Context<SettingsPage>) -> AnyElement {
+    div()
+        .id(id.into())
+        .flex()
+        .items_center()
+        .h(px(26.))
+        .px(px(9.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(color(c::ACCENT))
+        .bg(color_a(c::ACCENT, 0.14))
+        .text_size(px(12.))
+        .text_color(color(c::TEXT))
+        .child("Press a shortcut… (Esc cancels)")
+        .on_mouse_down_out(cx.listener(|this, _, _, cx| this.stop_recording(cx)))
+        .into_any_element()
+}
+
+fn small_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .h(px(26.))
+        .px(px(10.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(color(c::POPUP_BORDER))
+        .cursor_pointer()
+        .text_size(px(theme::UI_SMALL))
+        .text_color(color(c::TEXT_MUTED))
+        .hover(|s| s.bg(color(c::HOVER)).text_color(color(c::TEXT)))
+        .child(label)
+}
+
 fn chip(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, selected: bool) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id.into())
@@ -451,6 +758,8 @@ impl Render for SettingsPage {
             toggle("settings-reopen", s.reopen_projects, |s, v| s.reopen_projects = v),
         ));
 
+        let keymap = self.keymap_section(&s, cx);
+
         let reset = div()
             .id("settings-reset")
             .flex()
@@ -501,6 +810,8 @@ impl Render for SettingsPage {
                     .child(run_debug)
                     .child(section("STARTUP"))
                     .child(startup)
+                    .child(section("KEYMAP"))
+                    .child(keymap)
                     .child(div().pt(px(18.)).text_size(px(11.5)).text_color(color(c::TEXT_FAINT)).child(format!("Changes apply at once and are saved to {file}"))),
             )
     }

@@ -186,7 +186,11 @@ single portable `.exe`.
   - separate **interface, editor and terminal fonts** — any installed font, picked from a
     searchable list;
   - font sizes, usage / inlay hints, autosave and its delay, terminal shell, reopening projects on
-    launch, Python project set-up.
+    launch, Python project set-up;
+  - a **Keymap**: about 50 commands with their shortcuts, searchable by name or by keys. Click a
+    shortcut to record a new one, `+` adds another, `×` removes it. A shortcut another command
+    already uses is flagged, with a button to take it away from there; changed commands can be
+    reset one by one or all at once. Menus and the Welcome screen show the shortcuts you set.
 
 ## Roadmap
 
@@ -194,7 +198,6 @@ Planned, roughly in this order:
 
 - [ ] **Databases, next steps** — SSH tunnels, editing query results (not only table tabs)
       (connections, the schema browser, the SQL console, editing, export and CSV import are done).
-- [ ] **Keymap editor** in Settings.
 - [ ] **Debugging beyond Python and JavaScript** verified end to end: Rust / C / C++ (`lldb-dap`),
       Go (`delve`).
 - [ ] **Python**: dependencies from `pyproject.toml` (uv, Poetry, PDM) and an interpreter picker.

@@ -119,46 +119,13 @@ pub(crate) fn m(keys: &str) -> String {
     if cfg!(target_os = "macos") { keys.replace("mod-", "cmd-") } else { keys.replace("mod-", "ctrl-") }
 }
 
+/// The fixed bindings (cursor, selection, clipboard, text inputs) and every command's
+/// shortcuts from [`crate::keymap`], with the user's changes.
 pub fn bind_keys(cx: &mut App) {
-    let ws = Some("Workspace");
     let ed = Some("Editor");
     let ti = Some("TextInput");
     let term = Some("Terminal");
     cx.bind_keys([
-        // Workspace (global)
-        KeyBinding::new(&m("mod-k"), SearchEverywhere, ws),
-        KeyBinding::new(&m("mod-shift-o"), SearchEverywhere, ws),
-        KeyBinding::new(&m("mod-shift-f"), FindInFiles, ws),
-        KeyBinding::new("shift-f10", RunActive, ws),
-        KeyBinding::new(&m("mod-r"), RunActive, ed),
-        KeyBinding::new("alt-shift-f12", ToggleDetachTerminal, ws),
-        KeyBinding::new("alt-f12", FocusTerminal, ws),
-        KeyBinding::new(&m("mod-1"), ToggleLeftDock, ws),
-        KeyBinding::new(&m("mod-b"), editor::GoToDefinition, ed),
-        KeyBinding::new("f12", editor::GoToDefinition, ed),
-        KeyBinding::new(&m("mod-q"), editor::QuickDocumentation, ed),
-        KeyBinding::new("alt-enter", editor::ShowCodeActions, ed),
-        KeyBinding::new(&m("mod-p"), editor::ParameterInfo, ed),
-        KeyBinding::new(&m("mod-j"), ToggleBottomDock, ws),
-        KeyBinding::new(&m("mod-,"), OpenSettings, ws),
-        KeyBinding::new(&m("mod-alt-b"), ToggleRightDock, ws),
-        KeyBinding::new(&m("mod-shift-t"), NewTerminal, ws),
-        KeyBinding::new(&m("mod-f4"), CloseActiveTab, ws),
-        KeyBinding::new(&m("mod-tab"), NextTab, ws),
-        KeyBinding::new(&m("mod-shift-tab"), PrevTab, ws),
-        KeyBinding::new(&m("mod-alt-s"), SaveAll, ws),
-        KeyBinding::new(&m("mod-shift-s"), SaveAs, ws),
-        KeyBinding::new(&m("mod-o"), OpenFile, ws),
-        KeyBinding::new("alt-insert", NewFile, ws),
-        KeyBinding::new(&m("mod-q"), Quit, ws),
-        KeyBinding::new("shift-f9", DebugActive, ws),
-        KeyBinding::new("f9", DebugResume, ws),
-        KeyBinding::new("f8", DebugStepOver, ws),
-        KeyBinding::new("f7", DebugStepInto, ws),
-        KeyBinding::new("shift-f8", DebugStepOut, ws),
-        KeyBinding::new(&m("mod-f2"), DebugStop, ws),
-        KeyBinding::new(&m("mod-f8"), editor::ToggleBreakpoint, ed),
-        KeyBinding::new(&m("mod-shift-f8"), editor::EditBreakpoint, ed),
         // Editor
         KeyBinding::new("left", editor::MoveLeft, ed),
         KeyBinding::new("right", editor::MoveRight, ed),
@@ -195,28 +162,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(&m("mod-c"), editor::Copy, ed),
         KeyBinding::new(&m("mod-x"), editor::Cut, ed),
         KeyBinding::new(&m("mod-v"), editor::Paste, ed),
-        KeyBinding::new(&m("mod-z"), editor::Undo, ed),
-        KeyBinding::new(&m("mod-shift-z"), editor::Redo, ed),
-        KeyBinding::new(&m("mod-y"), editor::Redo, ed),
-        KeyBinding::new(&m("mod-d"), editor::DuplicateLine, ed),
-        KeyBinding::new(&m("mod-shift-k"), editor::DeleteLine, ed),
-        KeyBinding::new(&m("mod-/"), editor::ToggleComment, ed),
-        // Folding (JetBrains): Ctrl+- / Ctrl+= and with Shift for all. Shift+- arrives as "_".
-        KeyBinding::new(&m("mod--"), editor::FoldRegion, ed),
-        KeyBinding::new(&m("mod-="), editor::UnfoldRegion, ed),
-        KeyBinding::new(&m("mod-_"), editor::FoldAll, ed),
-        KeyBinding::new(&m("mod-shift--"), editor::FoldAll, ed),
-        KeyBinding::new(&m("mod-+"), editor::UnfoldAll, ed),
-        KeyBinding::new(&m("mod-shift-="), editor::UnfoldAll, ed),
-        KeyBinding::new(&m("mod-w"), editor::ExtendSelection, ed),
-        KeyBinding::new(&m("mod-shift-w"), editor::ShrinkSelection, ed),
-        KeyBinding::new("alt-shift-up", editor::MoveLineUp, ed),
-        KeyBinding::new("alt-shift-down", editor::MoveLineDown, ed),
         KeyBinding::new("escape", editor::Escape, ed),
-        KeyBinding::new(&m("mod-space"), editor::ShowCompletions, ed),
-        KeyBinding::new(&m("mod-s"), editor::Save, ed),
-        // SQL console
-        KeyBinding::new(&m("mod-enter"), crate::database::RunStatement, Some("DbConsole")),
         // Text inputs
         KeyBinding::new("backspace", input::Backspace, ti),
         KeyBinding::new("delete", input::Delete, ti),
@@ -238,10 +184,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", input::Up, ti),
         KeyBinding::new("down", input::Down, ti),
         // Terminal
-        KeyBinding::new(&m("mod-shift-c"), terminal::Copy, term),
-        KeyBinding::new(&m("mod-shift-v"), terminal::Paste, term),
-        KeyBinding::new("shift-insert", terminal::Paste, term),
         KeyBinding::new("shift-pageup", terminal::ScrollPageUp, term),
         KeyBinding::new("shift-pagedown", terminal::ScrollPageDown, term),
     ]);
+    let (bindings, invalid) = crate::keymap::bindings(&crate::app_settings::get(cx));
+    cx.bind_keys(bindings);
+    if !invalid.is_empty() {
+        log::warn!("keymap: shortcuts that could not be read: {}", invalid.join(", "));
+    }
 }

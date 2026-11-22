@@ -887,17 +887,19 @@ fn tab_icon(info: &TabInfo) -> gpui::AnyElement {
     }
 }
 
-fn empty_state() -> impl IntoElement {
-    let row = |label: &'static str, keys: &[&'static str]| {
-        div()
+fn empty_state(cx: &App) -> impl IntoElement {
+    // Shortcuts as set in Settings → Keymap; a command without one is left out.
+    let row = |label: &'static str, keys: Vec<String>| {
+        (!keys.is_empty()).then(|| div()
             .flex()
             .items_center()
             .justify_between()
             .w(px(360.))
             .h(px(32.))
             .child(div().text_color(color(c::TEXT_MUTED)).child(label))
-            .child(div().flex().gap(px(4.)).children(keys.iter().map(|k| kbd(*k))))
+            .child(div().flex().gap(px(4.)).children(keys.into_iter().map(kbd))))
     };
+    let shortcut = |label: &'static str, id: &str| row(label, crate::keymap::shortcut_parts(id, cx));
     div()
         .size_full()
         .flex()
@@ -907,12 +909,12 @@ fn empty_state() -> impl IntoElement {
         .gap(px(2.))
         .child(icon(Icon::Sparkle, 36., color(c::ACCENT)))
         .child(div().mt(px(10.)).mb(px(14.)).text_size(px(17.)).text_color(color(c::TEXT)).child("Graphyne"))
-        .child(row("Search Everywhere", &["Shift", "Shift"]))
-        .child(row("Go to File / Action", &["Ctrl", "K"]))
-        .child(row("Find in Files", &["Ctrl", "Shift", "F"]))
-        .child(row("Run Current File", &["Shift", "F10"]))
-        .child(row("Toggle Terminal", &["Ctrl", "J"]))
-        .child(row("Detach Terminal", &["Alt", "Shift", "F12"]))
+        .children(row("Search Everywhere", vec!["Shift".into(), "Shift".into()]))
+        .children(shortcut("Go to File / Action", "search_everywhere"))
+        .children(shortcut("Find in Files", "find_in_files"))
+        .children(shortcut("Run Current File", "run"))
+        .children(shortcut("Toggle Terminal", "toggle_terminal"))
+        .children(shortcut("Detach Terminal", "detach_terminal"))
 }
 
 impl Render for EditorPane {
@@ -1023,7 +1025,7 @@ impl Render for EditorPane {
             Some(PaneItem::Settings(p)) => p.clone().into_any_element(),
             Some(PaneItem::DbConsole(c)) => c.clone().into_any_element(),
             Some(PaneItem::DbTable(t)) => t.clone().into_any_element(),
-            None => empty_state().into_any_element(),
+            None => empty_state(cx).into_any_element(),
         };
         let problems = self.render_problems(cx);
         island()

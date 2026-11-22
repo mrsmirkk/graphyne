@@ -32,6 +32,10 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
     }
     apply(&new);
     cx.set_global(AppSettings(new.clone()));
+    if new.keymap != old.keymap {
+        // Deferred: a keystroke being recorded may still be in dispatch.
+        cx.defer(crate::lua_bridge::rebind);
+    }
     if new.usage_hints != old.usage_hints {
         // Deferred: the Settings tab's own window is busy handling this click.
         cx.defer(|cx| {

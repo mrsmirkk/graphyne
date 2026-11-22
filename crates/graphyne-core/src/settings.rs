@@ -54,6 +54,9 @@ pub struct Settings {
     /// Reopen the last session's projects on launch (off: always the Welcome screen).
     #[serde(rename = "startup.reopen_projects")]
     pub reopen_projects: bool,
+    /// Shortcuts changed in Settings → Keymap: command id → its keystrokes ("ctrl-shift-k";
+    /// an empty list leaves the command without one). Commands not listed keep their defaults.
+    pub keymap: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Settings {
@@ -72,6 +75,7 @@ impl Default for Settings {
             shell: "auto".into(),
             reopen_projects: true,
             python_auto_env: true,
+            keymap: Default::default(),
         }
     }
 }

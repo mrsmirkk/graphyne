@@ -14,6 +14,7 @@ mod file_icons;
 mod file_icons_data;
 mod file_tree;
 mod hex_view;
+mod keymap;
 mod lsp_store;
 mod lua_bridge;
 mod panels;

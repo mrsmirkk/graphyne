@@ -192,7 +192,7 @@ fn notify(message: String, error: bool, cx: &mut App) {
 }
 
 /// Built-in bindings plus every `graphyne.keymap.set` binding (re-run on each change).
-fn rebind(cx: &mut App) {
+pub(crate) fn rebind(cx: &mut App) {
     cx.clear_key_bindings();
     crate::actions::bind_keys(cx);
     let keys = cx.global::<LuaState>().keys.clone();

@@ -38,20 +38,21 @@ pub enum IdeAction {
     Quit,
 }
 
+/// (label, keymap command whose shortcut is shown, action).
 const ACTIONS: &[(&str, &str, IdeAction)] = &[
-    ("Run Current File", "Shift+F10", IdeAction::Run),
-    ("Toggle Left Panel", "Ctrl+1", IdeAction::ToggleLeft),
-    ("Toggle Bottom Panel", "Ctrl+J", IdeAction::ToggleBottom),
-    ("Toggle Right Panel", "Ctrl+Alt+B", IdeAction::ToggleRight),
-    ("New Terminal", "Ctrl+Shift+T", IdeAction::NewTerminal),
-    ("Detach / Attach Terminal", "Alt+Shift+F12", IdeAction::DetachTerminal),
-    ("Find in Files", "Ctrl+Shift+F", IdeAction::FindInFiles),
-    ("Save All", "Ctrl+Alt+S", IdeAction::SaveAll),
-    ("New File…", "Alt+Insert", IdeAction::NewFile),
-    ("New Folder…", "", IdeAction::NewFolder),
-    ("Open File…", "Ctrl+O", IdeAction::OpenFile),
-    ("Save As…", "Ctrl+Shift+S", IdeAction::SaveAs),
-    ("Close All Tabs", "", IdeAction::CloseAllTabs),
+    ("Run Current File", "run", IdeAction::Run),
+    ("Toggle Left Panel", "toggle_left_panel", IdeAction::ToggleLeft),
+    ("Toggle Bottom Panel", "toggle_terminal", IdeAction::ToggleBottom),
+    ("Toggle Right Panel", "toggle_right_panel", IdeAction::ToggleRight),
+    ("New Terminal", "new_terminal", IdeAction::NewTerminal),
+    ("Detach / Attach Terminal", "detach_terminal", IdeAction::DetachTerminal),
+    ("Find in Files", "find_in_files", IdeAction::FindInFiles),
+    ("Save All", "save_all", IdeAction::SaveAll),
+    ("New File…", "new_file", IdeAction::NewFile),
+    ("New Folder…", "new_folder", IdeAction::NewFolder),
+    ("Open File…", "open_file", IdeAction::OpenFile),
+    ("Save As…", "save_as", IdeAction::SaveAs),
+    ("Close All Tabs", "close_all_tabs", IdeAction::CloseAllTabs),
     ("Database: Show Panel", "", IdeAction::DatabasePanel),
     ("Database: Add SQLite File…", "", IdeAction::AddDatabase),
     ("Database: New SQLite Database…", "", IdeAction::NewDatabase),
@@ -60,8 +61,8 @@ const ACTIONS: &[(&str, &str, IdeAction)] = &[
     ("Open Folder…", "", IdeAction::OpenFolder),
     ("Close Project", "", IdeAction::CloseProject),
     ("Plugins", "", IdeAction::Plugins),
-    ("Settings", "Ctrl+,", IdeAction::Settings),
-    ("Exit", "Ctrl+Q", IdeAction::Quit),
+    ("Settings", "settings", IdeAction::Settings),
+    ("Exit", "exit", IdeAction::Quit),
 ];
 
 #[derive(Clone, Debug)]
@@ -90,7 +91,7 @@ struct Entry {
     label: String,
     detail: String,
     indices: Vec<u32>,
-    shortcut: Option<&'static str>,
+    shortcut: Option<String>,
     section: &'static str,
     symbol_kind: Option<SymbolKind>,
 }
@@ -202,13 +203,13 @@ impl SearchEverywhere {
         if want(Tab::Actions) {
             let labels: Vec<&str> = ACTIONS.iter().map(|a| a.0).collect();
             for m in fuzzy_filter(&labels, &q, 20, false) {
-                let (label, shortcut, action) = ACTIONS[m.index];
+                let (label, command, action) = ACTIONS[m.index];
                 entries.push(Entry {
                     item: SearchItem::Action(action),
                     label: label.to_string(),
                     detail: String::new(),
                     indices: m.indices,
-                    shortcut: (!shortcut.is_empty()).then_some(shortcut),
+                    shortcut: crate::keymap::shortcut(command, cx),
                     section: "Actions",
                     symbol_kind: None,
                 });
@@ -321,7 +322,7 @@ impl Render for SearchEverywhere {
                                 .child(leading)
                                 .child(highlighted_label(&e.label, &e.indices, color(c::TEXT), color(c::MATCH)))
                                 .child(div().flex_1().min_w(px(0.)).whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(12.)).text_color(color(c::TEXT_DIM)).child(e.detail.clone()))
-                                .children(e.shortcut.map(|s| div().text_size(px(11.5)).text_color(color(c::TEXT_DIM)).child(s)))
+                                .children(e.shortcut.clone().map(|s| div().text_size(px(11.5)).text_color(color(c::TEXT_DIM)).child(s)))
                                 .when(first_in_section, |d| d.child(div().text_size(px(11.)).text_color(color(c::TEXT_FAINT)).child(e.section)))
                         })
                         .collect()
