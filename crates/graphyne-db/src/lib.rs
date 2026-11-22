@@ -19,7 +19,7 @@ mod value;
 
 pub use edit::{CellEdit, EditStatement};
 pub use export::{ExportFormat, export};
-pub use import::{ColumnType, Csv, match_columns, parse_csv};
+pub use import::{ColumnType, Csv, decode_text, match_columns, parse_csv};
 pub use config::{DbConfig, DbKind, SQLITE_EXTENSIONS, ServerConfig, SslMode, is_sqlite_file, load_configs, save_configs};
 pub use session::DbSession;
 pub use sqlite::create_sqlite;

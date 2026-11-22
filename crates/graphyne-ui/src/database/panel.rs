@@ -311,7 +311,7 @@ impl DatabasePanel {
             let Some(path) = paths.into_iter().next() else { return };
             let file = path.clone();
             let parsed = cx
-                .background_spawn(async move { std::fs::read(&file).map_err(|e| e.to_string()).and_then(|bytes| graphyne_db::parse_csv(&String::from_utf8_lossy(&bytes))) })
+                .background_spawn(async move { std::fs::read(&file).map_err(|e| e.to_string()).and_then(|bytes| graphyne_db::parse_csv(&graphyne_db::decode_text(&bytes))) })
                 .await;
             let fail = |e: String, cx: &mut Context<Self>| cx.emit(DbPanelEvent::Notify(format!("Import failed: {e}"), true));
             // The statements and the table they fill, worked out from the schema.

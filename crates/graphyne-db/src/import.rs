@@ -20,6 +20,65 @@ pub enum ColumnType {
     Text,
 }
 
+/// Whether non-UTF-8 text looks like Windows-1251: Cyrillic words are made of bytes ≥ 0x80
+/// only, while accented Latin letters (Windows-1252) come one or two at a time among ASCII ones.
+fn looks_cyrillic(bytes: &[u8]) -> bool {
+    let (mut high, mut in_runs, mut run) = (0usize, 0usize, 0usize);
+    for &b in bytes.iter().chain(std::iter::once(&b' ')) {
+        if b >= 0x80 {
+            high += 1;
+            run += 1;
+        } else {
+            if run >= 3 {
+                in_runs += run;
+            }
+            run = 0;
+        }
+    }
+    high > 0 && in_runs * 2 > high
+}
+
+/// The text of a CSV file: UTF-8 (with or without a BOM), UTF-16 with a BOM (Excel's "Unicode
+/// Text"), else Windows-1251 when it looks Cyrillic (a Russian Excel's "CSV"), else the
+/// system's ANSI code page.
+pub fn decode_text(bytes: &[u8]) -> String {
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        let units: Vec<u16> = rest.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        return String::from_utf16_lossy(&units);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        let units: Vec<u16> = rest.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        return String::from_utf16_lossy(&units);
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => code_page(bytes, if looks_cyrillic(bytes) { 1251 } else { 0 }),
+    }
+}
+
+/// Decode with a Windows code page (`0`: the system's ANSI one).
+#[cfg(windows)]
+fn code_page(bytes: &[u8], page: u32) -> String {
+    use windows_sys::Win32::Globalization::MultiByteToWideChar;
+    let Ok(len) = i32::try_from(bytes.len()) else { return String::from_utf8_lossy(bytes).into_owned() };
+    // SAFETY: the buffers and lengths passed match.
+    unsafe {
+        let n = MultiByteToWideChar(page, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0);
+        if n <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        let mut wide = vec![0u16; n as usize];
+        let n = MultiByteToWideChar(page, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), n);
+        wide.truncate(n.max(0) as usize);
+        String::from_utf16_lossy(&wide)
+    }
+}
+
+#[cfg(not(windows))]
+fn code_page(bytes: &[u8], _page: u32) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 /// The separator used by the first line: the most frequent of `,` `;` and tab outside quotes.
 fn guess_delimiter(text: &str) -> char {
     let (mut quoted, mut counts) = (false, [0usize; 3]);
@@ -253,6 +312,20 @@ mod tests {
         assert!(parse_csv("a,b\n1,2,3").unwrap_err().contains("line 2"));
         assert!(parse_csv("a\n\"open").is_err());
         assert!(parse_csv("").is_err());
+    }
+
+    #[test]
+    fn decodes_utf8_utf16_and_the_ansi_code_page() {
+        assert_eq!(decode_text("имя,город\n".as_bytes()), "имя,город\n");
+        let utf16: Vec<u8> = [0xFF, 0xFE].into_iter().chain("имя\tгород".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        assert_eq!(decode_text(&utf16), "имя\tгород");
+        // A Russian Excel's CSV (Windows-1251): "имя;город\nАня;Казань".
+        let cp1251 = [0xE8, 0xEC, 0xFF, b';', 0xE3, 0xEE, 0xF0, 0xEE, 0xE4, b'\n', 0xC0, 0xED, 0xFF, b';', 0xCA, 0xE0, 0xE7, 0xE0, 0xED, 0xFC];
+        assert_eq!(decode_text(&cp1251), "имя;город\nАня;Казань");
+        // Accented Latin letters are not taken for Cyrillic.
+        assert!(!looks_cyrillic(&[b'c', b'a', b'f', 0xE9, b',', b'c', b'r', 0xE8, b'm', b'e']));
+        let latin = decode_text(&[b'c', b'a', b'f', 0xE9]);
+        assert!(latin.starts_with("caf") && latin.chars().count() == 4 && !latin.contains('\u{FFFD}'), "{latin:?}");
     }
 
     #[test]

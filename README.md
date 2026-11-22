@@ -149,7 +149,8 @@ single portable `.exe`.
   them all in one transaction (nothing is saved if a row was changed elsewhere meanwhile) or
   **Revert** drops them.
 - **Export** results and tables to **CSV, JSON or SQL INSERT** statements; copy a cell or a row.
-- **Import CSV** (comma, semicolon or tab separated): right-click a connection to create a new
+- **Import CSV** (comma, semicolon or tab separated; UTF-8, UTF-16 or Windows-1251 from a Russian
+  Excel, detected automatically): right-click a connection to create a new
   table with guessed column types (whole numbers, decimals, text; `007` stays text; a first `id`
   column of distinct numbers becomes the primary key), or a table to add rows to it, columns
   matched by the header. One transaction: all rows or none.
