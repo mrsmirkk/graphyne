@@ -115,8 +115,12 @@ single portable `.exe`.
   (`p.x + p.y`; LLDB doesn't call methods). Graphyne downloads CodeLLDB (about 50 MB, checked
   against a pinned SHA-256) on the first Rust debug session unless `lldb-dap` or `codelldb` is on
   PATH. Frames of std / core and the program's start-up are hidden from the call stack.
-- C and C++ (`gcc` / `g++`, then `gdb` ≥ 14 or the same LLDB) and Go via `dlv` — wired up, not
-  yet verified.
+- **C and C++** — tested with GCC 16 (MinGW-w64 / w64devkit): the file is compiled with
+  `gcc` / `g++ -g -O0`, then debugged with `gdb` when it speaks DAP (GDB 14+ built with Python),
+  otherwise with the same CodeLLDB as Rust — breakpoints, stepping into functions, inline values,
+  structs, arrays, `std::string` and `std::vector` elements, and expressions
+  (`p.x * p.y + items[2]`). MinGW's and w64devkit's GDB have no Python, so CodeLLDB is used there.
+- Go via `dlv` — wired up, not yet verified.
 
 ### Python projects
 - When a Python file appears in a project (or on the first Run / Debug), Graphyne creates `.venv`
@@ -243,8 +247,7 @@ Planned, roughly in this order:
 
 - [ ] **Databases, next steps** — SSH tunnels (connections, the schema browser, the SQL console,
       editing tables and query results, export and CSV import are done).
-- [ ] **Debugging C / C++ and Go** verified end to end (Rust, Python and JavaScript / TypeScript
-      are).
+- [ ] **Debugging Go** verified end to end (Python, JavaScript / TypeScript, Rust, C and C++ are).
 - [ ] **macOS and Linux** builds (GPUI supports both; Graphyne isn't tested there yet).
 - [ ] **Faster start-up** — most of today's ~0.4 s goes to Direct3D initialization.
 - [ ] An extension gallery (install from a URL).

@@ -282,9 +282,20 @@ fn lldb_launch(adapter: &str, title: &str, exe: &Path, cwd: &Path, language: &st
     }
 }
 
+/// GDB's DAP mode (`gdb -i dap`) needs GDB 14+ built with Python; MinGW / w64devkit builds
+/// often have no Python and answer "Interpreter `dap' unrecognized".
+fn gdb_speaks_dap(gdb: &Path) -> bool {
+    hidden_command(&gdb.to_string_lossy())
+        .args(["-nx", "--batch", "-i", "dap"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|out| out.status.success() && !String::from_utf8_lossy(&out.stderr).contains("unrecognized"))
+}
+
 fn native(file: &Path, dir: &Path, title: &str, lang: LanguageId, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
     let exe = std::env::temp_dir().join(if cfg!(windows) { "graphyne-debug.exe" } else { "graphyne-debug" });
     let compiler = if lang == LanguageId::Cpp { "g++" } else { "gcc" };
+    progress(&format!("Compiling with {compiler}…"));
     let out = hidden_command(compiler)
         .args(["-g", "-O0"])
         .arg(file)
@@ -296,8 +307,8 @@ fn native(file: &Path, dir: &Path, title: &str, lang: LanguageId, progress: &dyn
     if !out.status.success() {
         return Err(format!("{compiler} failed:\n{}", String::from_utf8_lossy(&out.stderr)));
     }
-    // GDB ≥ 14 speaks DAP natively; otherwise LLDB.
-    if let Some(gdb) = which("gdb") {
+    // GDB ≥ 14 built with Python speaks DAP; otherwise LLDB.
+    if let Some(gdb) = which("gdb").filter(|g| gdb_speaks_dap(g)) {
         return Ok(Resolved {
             name: "gdb",
             adapter_id: "gdb",

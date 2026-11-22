@@ -371,6 +371,26 @@ impl TerminalState {
         for (k, v) in &opts.env {
             cmd.env(k, v);
         }
+        // On Windows portable-pty rebuilds PATH from the registry (so programs installed since
+        // Graphyne started are found). Keep the folders Graphyne itself was started with too —
+        // a developer prompt, an activated environment — first, as a child would inherit them.
+        #[cfg(windows)]
+        if let Some(own) = std::env::var_os("PATH") {
+            let base: Vec<PathBuf> = cmd.get_env("PATH").map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
+            let key = |p: &PathBuf| p.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase();
+            let known: std::collections::HashSet<String> = base.iter().map(key).collect();
+            let mut extra: Vec<PathBuf> = Vec::new();
+            for dir in std::env::split_paths(&own).filter(|d| !d.as_os_str().is_empty()) {
+                if !known.contains(&key(&dir)) && !extra.iter().any(|e| key(e) == key(&dir)) {
+                    extra.push(dir);
+                }
+            }
+            if !extra.is_empty() {
+                if let Ok(path) = std::env::join_paths(extra.into_iter().chain(base)) {
+                    cmd.env("PATH", path);
+                }
+            }
+        }
         if !opts.path_prepend.is_empty() {
             // Keys are case-insensitive here on Windows ("Path" / "PATH").
             let base = cmd.get_env("PATH").map(|p| p.to_os_string()).unwrap_or_default();
