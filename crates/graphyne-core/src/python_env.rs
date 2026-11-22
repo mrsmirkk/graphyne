@@ -10,8 +10,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Folders recognised as the project's virtual environment (must contain `pyvenv.cfg`).
 pub const VENV_DIRS: [&str; 3] = [".venv", "venv", "env"];
 
-/// Files of tools that manage the environment themselves (Graphyne leaves those alone).
-const OTHER_MANAGERS: [&str; 4] = ["poetry.lock", "Pipfile", "environment.yml", "environment.yaml"];
 
 pub fn find_venv(root: &Path) -> Option<PathBuf> {
     VENV_DIRS.iter().map(|d| root.join(d)).find(|d| d.join("pyvenv.cfg").is_file())
@@ -65,6 +63,19 @@ pub fn terminal_env(root: &Path) -> (Vec<(String, String)>, Vec<PathBuf>) {
                 Some(venv) => {
                     let name = venv.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     (vec![("VIRTUAL_ENV".into(), venv.to_string_lossy().to_string()), ("VIRTUAL_ENV_PROMPT".into(), name)], vec![bin])
+                }
+                None if bin.join("conda-meta").is_dir() => {
+                    // A conda environment: what `conda activate` puts on PATH (its DLLs too).
+                    let name = bin.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let dirs: Vec<PathBuf> = if cfg!(windows) {
+                        [bin.clone(), bin.join("Library").join("mingw-w64").join("bin"), bin.join("Library").join("usr").join("bin"), bin.join("Library").join("bin"), bin.join("Scripts"), bin.join("bin")]
+                            .into_iter()
+                            .filter(|d| d.is_dir())
+                            .collect()
+                    } else {
+                        vec![bin.clone()]
+                    };
+                    (vec![("CONDA_PREFIX".into(), bin.to_string_lossy().to_string()), ("CONDA_DEFAULT_ENV".into(), name)], dirs)
                 }
                 None => {
                     // A Python installation: pip and other tools live in its Scripts folder.
@@ -309,10 +320,15 @@ pub struct Interpreter {
 }
 
 impl Interpreter {
-    /// "Python 3.12.4 (.venv)" for an environment, "Python 3.12.4" for an installation.
+    /// "Python 3.12.4 (.venv)" for an environment, "Python 3.12.4 (conda: data)" for a conda
+    /// environment, "Python 3.12.4" for an installation.
     pub fn label(&self) -> String {
-        match self.venv.as_ref().and_then(|v| v.file_name()) {
-            Some(name) => format!("Python {} ({})", self.version, name.to_string_lossy()),
+        if let Some(name) = self.venv.as_ref().and_then(|v| v.file_name()) {
+            return format!("Python {} ({})", self.version, name.to_string_lossy());
+        }
+        let home = self.path.parent().map(|d| if cfg!(windows) { d.to_path_buf() } else { d.parent().unwrap_or(d).to_path_buf() });
+        match home.filter(|h| h.join("conda-meta").is_dir()).as_ref().and_then(|h| h.file_name()) {
+            Some(env) => format!("Python {} (conda: {})", self.version, env.to_string_lossy()),
             None => format!("Python {}", self.version),
         }
     }
@@ -418,12 +434,13 @@ pub fn discover(root: &Path) -> Vec<Interpreter> {
     out
 }
 
-/// Poetry, Pipenv or conda project: its tool owns the environment.
+/// Poetry, PDM, Pipenv or conda project: its tool owns the environment (the file that says
+/// so). Graphyne installs the packages with that tool, after asking.
 pub fn managed_elsewhere(root: &Path) -> Option<&'static str> {
-    OTHER_MANAGERS.iter().copied().find(|f| root.join(f).is_file())
+    crate::python_tools::project_tool(root).map(|(_, file)| file)
 }
 
-fn command(program: &Path) -> Command {
+pub(crate) fn command(program: &Path) -> Command {
     let mut cmd = Command::new(program);
     cmd.stdin(Stdio::null());
     #[cfg(windows)]
@@ -630,6 +647,8 @@ pub fn pip_package(module: &str) -> &str {
 pub enum DepsFile {
     Requirements,
     Pyproject,
+    /// A Poetry / PDM / Pipenv / conda project, and the file that says so.
+    Tool(crate::python_tools::Tool, &'static str),
 }
 
 impl DepsFile {
@@ -637,6 +656,7 @@ impl DepsFile {
         match self {
             DepsFile::Requirements => "requirements.txt",
             DepsFile::Pyproject => "pyproject.toml",
+            DepsFile::Tool(_, file) => file,
         }
     }
 }
@@ -649,8 +669,9 @@ pub enum Requirements {
     NotApplicable,
     /// Installed (or declined) for this exact list.
     UpToDate,
-    /// Not installed yet: ask. `packages` = how many are listed; `changed` = an earlier
-    /// version of the list was installed; `uv` = installed with `uv sync` (uv.lock).
+    /// Not installed yet: ask. `packages` = how many are listed (0: a tool's project);
+    /// `changed` = an earlier version of the list was installed; `uv` = installed with
+    /// `uv sync` (uv.lock) — for a tool's project: the tool runs through uv (not installed).
     Ask { packages: usize, changed: bool, file: DepsFile, uv: bool },
 }
 
@@ -670,16 +691,34 @@ fn content_hash(text: &str) -> String {
 }
 
 fn read_marker(venv: &Path) -> serde_json::Value {
-    std::fs::read_to_string(marker(venv)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(serde_json::Value::Null)
+    read_marker_at(&marker(venv))
 }
 
 fn write_marker(venv: &Path, key: &str, hash: &str) {
-    let mut m = read_marker(venv);
+    write_marker_at(&marker(venv), key, hash);
+}
+
+fn read_marker_at(file: &Path) -> serde_json::Value {
+    std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(serde_json::Value::Null)
+}
+
+fn write_marker_at(file: &Path, key: &str, hash: &str) {
+    let mut m = read_marker_at(file);
     if !m.is_object() {
         m = serde_json::json!({});
     }
     m[key] = serde_json::Value::String(hash.to_string());
-    let _ = std::fs::write(marker(venv), m.to_string());
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(file, m.to_string());
+}
+
+/// A tool's project: its environment may live anywhere, so the marker is kept in Graphyne's
+/// folder for the project. The hash is of the file that lists the packages.
+fn tool_marker(root: &Path, tool: crate::python_tools::Tool, file: &str) -> Option<(PathBuf, String)> {
+    let text = std::fs::read_to_string(root.join(file)).ok()?;
+    Some((crate::session::project_data_dir(root)?.join("python-packages.json"), content_hash(&format!("{}\n{text}", tool.name()))))
 }
 
 /// Lines of a requirements file that name a package (not comments or pip options).
@@ -769,6 +808,15 @@ fn uses_uv_sync(root: &Path, venv: &Path) -> bool {
 }
 
 pub fn requirements(root: &Path) -> Requirements {
+    if let Some((tool, file)) = crate::python_tools::project_tool(root) {
+        let Some((marker, hash)) = tool_marker(root, tool, file) else { return Requirements::NotApplicable };
+        let m = read_marker_at(&marker);
+        if m["installed"] == hash.as_str() || m["declined"] == hash.as_str() {
+            return Requirements::UpToDate;
+        }
+        let through_uv = !crate::python_tools::installed(tool);
+        return Requirements::Ask { packages: 0, changed: m["installed"].is_string(), file: DepsFile::Tool(tool, file), uv: through_uv };
+    }
     let (Some(venv), Some(deps)) = (active_venv(root), project_deps(root)) else {
         return Requirements::NotApplicable;
     };
@@ -783,8 +831,22 @@ pub fn requirements(root: &Path) -> Requirements {
 /// Install the project's packages into its virtualenv: `uv sync` for a uv project (uv.lock),
 /// else requirements.txt / pyproject.toml's dependencies with the project's installer (uv or
 /// pip). This runs the packages' install code — only after the user agreed. The error comes
-/// with the installer that failed (after uv, pip may be worth a try).
-pub fn install_requirements(root: &Path, progress: impl Fn(Step)) -> Result<(DepsFile, Installer), (String, Installer)> {
+/// with the installer that failed (after uv, pip may be worth a try). A Poetry / PDM / Pipenv /
+/// conda project is installed by its tool, and the interpreter of the tool's environment comes
+/// back for the project to use.
+pub fn install_requirements(root: &Path, progress: impl Fn(Step)) -> Result<(DepsFile, Installer, Option<PathBuf>), (String, Installer)> {
+    if let Some((tool, file)) = crate::python_tools::project_tool(root) {
+        progress(Step::InstallingPackages);
+        // Not an installer of Graphyne's: no "Use pip" offer for it (Installer::Pip).
+        let python = crate::python_tools::install(root, tool, file, &progress).map_err(|e| (e, Installer::Pip))?;
+        // The tool may have written its lock file (`poetry.lock`, `Pipfile.lock`): mark what
+        // is there now, or the next check would take the new file for a change.
+        let (tool, file) = crate::python_tools::project_tool(root).unwrap_or((tool, file));
+        if let Some((marker, hash)) = tool_marker(root, tool, file) {
+            write_marker_at(&marker, "installed", &hash);
+        }
+        return Ok((DepsFile::Tool(tool, file), Installer::Pip, Some(python)));
+    }
     let venv = active_venv(root).ok_or_else(|| ("the project has no .venv".to_string(), Installer::Pip))?;
     let deps = project_deps(root).ok_or_else(|| ("the project lists no packages".to_string(), Installer::Pip))?;
     let python = venv_python(&venv);
@@ -803,18 +865,25 @@ pub fn install_requirements(root: &Path, progress: impl Fn(Step)) -> Result<(Dep
             let mut cmd = install_command(uv.as_deref(), &python);
             match deps.file {
                 DepsFile::Requirements => cmd.args(["-r", "requirements.txt"]),
-                DepsFile::Pyproject => cmd.args(&deps.packages),
+                // (Tool projects returned above; project_deps never gives one.)
+                DepsFile::Pyproject | DepsFile::Tool(..) => cmd.args(&deps.packages),
             };
             run(cmd.current_dir(root), &format!("installing the packages from {} with {}", deps.file.name(), used.name()))
         }
     };
     result.map_err(|e| (e, used))?;
     write_marker(&venv, "installed", &deps.hash);
-    Ok((deps.file, used))
+    Ok((deps.file, used, None))
 }
 
 /// "Don't ask again" — until the list changes.
 pub fn decline_requirements(root: &Path) {
+    if let Some((tool, file)) = crate::python_tools::project_tool(root) {
+        if let Some((marker, hash)) = tool_marker(root, tool, file) {
+            write_marker_at(&marker, "declined", &hash);
+        }
+        return;
+    }
     if let (Some(venv), Some(deps)) = (active_venv(root), project_deps(root)) {
         write_marker(&venv, "declined", &deps.hash);
     }

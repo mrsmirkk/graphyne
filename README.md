@@ -144,7 +144,13 @@ single portable `.exe`.
   (exactly the locked versions; packages Graphyne added, such as debugpy, are kept), others with
   the project's package manager. A package that has to be compiled without a C++ compiler gets a
   hint: install Build Tools, or use an older Python the package has ready-made builds for.
-  Poetry (`poetry.lock`), Pipenv and conda projects are left to their own tools.
+- **Poetry, PDM, Pipenv and conda projects** (`poetry.lock` or `[tool.poetry]`, `pdm.lock`,
+  `Pipfile`, `environment.yml`) are installed with their own tool after Graphyne asks:
+  `poetry install`, `pdm sync`, `pipenv sync --dev`, `conda env create / update` (also mamba or
+  micromamba). Graphyne then uses the environment the tool made — wherever it lives — for Run,
+  Debug, code analysis and terminals (a conda environment's DLL folders are put on PATH, like
+  `conda activate`). Poetry, PDM and Pipenv don't need to be installed: Graphyne runs them through
+  uv. conda has to be installed (Miniforge or micromamba).
 
 ### Terminal
 - Built-in terminal with tabs, scrollback, selection, clickable `file:line` links, and a
@@ -232,7 +238,6 @@ Planned, roughly in this order:
       editing tables and query results, export and CSV import are done).
 - [ ] **Debugging beyond Python and JavaScript** verified end to end: Rust / C / C++ (`lldb-dap`),
       Go (`delve`).
-- [ ] **Python**: Poetry and PDM projects (their lock files).
 - [ ] **macOS and Linux** builds (GPUI supports both; Graphyne isn't tested there yet).
 - [ ] **Faster start-up** — most of today's ~0.4 s goes to Direct3D initialization.
 - [ ] Easier extension install (from a URL or a gallery).

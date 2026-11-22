@@ -903,14 +903,11 @@ impl Workspace {
                     self.file_tree.update(cx, |t, cx| t.refresh(cx));
                 }
             }
-            Ok(Outcome::ManagedElsewhere(file)) => {
+            Ok(Outcome::ManagedElsewhere(_)) => {
+                // Poetry / PDM / Pipenv / conda: the question offers to install with that tool.
                 self.py_env = PyEnv::Skipped;
-                let tool = match file {
-                    "poetry.lock" => "Poetry",
-                    "Pipfile" => "Pipenv",
-                    _ => "conda",
-                };
-                self.notify_user(format!("This project's Python environment is managed by {tool} ({file}); Graphyne leaves it to {tool}."), false, cx);
+                self.requirements_snoozed = false;
+                self.check_requirements(cx);
             }
             Err(e) => {
                 self.py_env = PyEnv::Failed;
@@ -1279,13 +1276,15 @@ impl Workspace {
                     row("py-inst-pip".into(), "pip".into(), Some("the standard installer that comes with Python".into()), choice == Some(Installer::Pip))
                         .on_click(cx.listener(|this, _, window, cx| this.choose_installer(Some(Installer::Pip), window, cx))),
                 );
-            if let Some(file) = graphyne_core::python_env::managed_elsewhere(&self.root) {
-                let tool = match file {
-                    "poetry.lock" => "Poetry",
-                    "Pipfile" => "Pipenv",
-                    _ => "conda",
-                };
-                panel = panel.child(div().px(px(10.)).py(px(6.)).text_color(color(c::TEXT_DIM)).child(format!("{tool} project ({file}): Graphyne leaves its environment to {tool}.")));
+            if let Some((tool, file)) = graphyne_core::python_tools::project_tool(&self.root) {
+                let how = tool.install_text(&self.root);
+                panel = panel.child(
+                    row("py-tool".into(), format!("{} project ({file})", tool.name()).into(), Some(format!("install its packages with `{how}` and use its environment").into()), false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.menu = None;
+                            this.install_requirements(cx);
+                        })),
+                );
             }
         }
         panel = panel.child(div().mx(px(6.)).my(px(4.)).h(px(1.)).bg(color(c::BORDER))).child(
@@ -1324,33 +1323,59 @@ impl Workspace {
         let root = self.root.clone();
         let (tx, rx) = flume::unbounded::<graphyne_core::python_env::Step>();
         self.show_steps(rx, cx);
+        let handle = self.window_handle;
         cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(async move { graphyne_core::python_env::install_requirements(&root, |s| drop(tx.send(s))) }).await;
-            this.update(cx, |this, cx| {
-                this.pip_status = None;
-                match result {
-                    Ok((file, used)) => {
-                        this.notify_user(format!("Python: installed the packages from {} into .venv with {}.", file.name(), used.name()), false, cx);
-                        if let Some(client) = this.lsp_store.read(cx).client_for(LanguageId::Python) {
-                            client.notify("workspace/didChangeConfiguration", serde_json::json!({ "settings": {} }));
-                        }
-                    }
-                    Err((e, used)) => {
-                        this.notify_user(format!("Python: {e}"), true, cx);
-                        if used == graphyne_core::python_env::Installer::Uv {
-                            // pip can install some things uv can't: offer it for this project.
-                            this.pip_offer = Some(e.into());
-                        } else {
-                            this.show_notifications = true;
-                            this.unread = false;
-                        }
-                    }
-                }
-                cx.notify();
+            cx.update(|cx| {
+                handle
+                    .update(cx, |_, window, cx| {
+                        this.update(cx, |this, cx| this.finish_install(result, window, cx)).ok();
+                    })
+                    .ok();
             })
             .ok();
         })
         .detach();
+    }
+
+    fn finish_install(
+        &mut self,
+        result: Result<(graphyne_core::python_env::DepsFile, graphyne_core::python_env::Installer, Option<PathBuf>), (String, graphyne_core::python_env::Installer)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use graphyne_core::python_env::DepsFile;
+        self.pip_status = None;
+        match result {
+            Ok((DepsFile::Tool(tool, _), _, python)) => {
+                self.notify_user(format!("Python: {} installed the project's packages. Run, Debug, code analysis and new terminals use its environment.", tool.name()), false, cx);
+                // The tool's environment becomes the project's interpreter.
+                if let Some(python) = python {
+                    graphyne_core::python_env::set_chosen(&self.root, Some(python));
+                    self.save_state(window, cx);
+                    self.python_changed(cx);
+                    // debugpy, as in any environment Graphyne sets up.
+                    self.start_python_env(cx);
+                }
+            }
+            Ok((file, used, _)) => {
+                self.notify_user(format!("Python: installed the packages from {} into .venv with {}.", file.name(), used.name()), false, cx);
+                if let Some(client) = self.lsp_store.read(cx).client_for(LanguageId::Python) {
+                    client.notify("workspace/didChangeConfiguration", serde_json::json!({ "settings": {} }));
+                }
+            }
+            Err((e, used)) => {
+                self.notify_user(format!("Python: {e}"), true, cx);
+                if used == graphyne_core::python_env::Installer::Uv {
+                    // pip can install some things uv can't: offer it for this project.
+                    self.pip_offer = Some(e.into());
+                } else {
+                    self.show_notifications = true;
+                    self.unread = false;
+                }
+            }
+        }
+        cx.notify();
     }
 
     /// Steps of a background Python job in the status bar (the download of uv, mostly).
@@ -1497,7 +1522,16 @@ impl Workspace {
         };
         let what = if packages == 1 { "1 package".to_string() } else { format!("{packages} packages") };
         let with = if uv { " with uv sync (uv.lock)" } else { "" };
-        let text = if changed {
+        let text = if let graphyne_core::python_env::DepsFile::Tool(tool, _) = file {
+            let how = tool.install_text(&self.root);
+            let via = match (uv, tool) {
+                (true, graphyne_core::python_tools::Tool::Conda) => " conda isn't installed on this computer, though: get Miniforge (conda-forge.org/download) first.",
+                (true, _) => " It isn't installed here: Graphyne runs it through uv (downloaded once).",
+                _ => "",
+            };
+            let again = if changed { " Its packages changed." } else { "" };
+            format!("A {} project ({name}).{again} Install its packages with `{how}` and use its environment?{via} Installing runs the packages' setup code — do it for projects you trust.", tool.name())
+        } else if changed {
             format!("The packages in {name} changed ({what}). Install them into .venv{with}? Installing runs the packages' setup code — do it for projects you trust.")
         } else {
             format!("{name} lists {what} that .venv doesn't have yet. Install them{with}? Installing runs their setup code — do it for projects you trust.")

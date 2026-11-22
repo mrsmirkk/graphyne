@@ -21,6 +21,7 @@ pub mod live_server;
 pub mod presets;
 pub mod project;
 pub mod python_env;
+pub mod python_tools;
 pub mod recent;
 pub mod run;
 pub mod secrets;

@@ -32,8 +32,15 @@
   `dependencies` в `pyproject.toml` (вместе с группой `dev`, как делает uv) — Graphyne ставит в
   `.venv` только после вопроса (Install / Not now / Don't ask again): без согласия ничего не
   ставит, а когда список пакетов меняется — спросит снова (смена номера версии проекта не в счёт).
-  Если есть `uv.lock` — через `uv sync`, иначе менеджером пакетов проекта. Проекты Poetry
-  (`poetry.lock`) / Pipenv / conda не трогает. Выключается в Settings → Run & Debug.
+  Если есть `uv.lock` — через `uv sync`, иначе менеджером пакетов проекта. Выключается в
+  Settings → Run & Debug.
+- **Проекты Poetry, PDM, Pipenv и conda** (`poetry.lock` или `[tool.poetry]`, `pdm.lock`,
+  `Pipfile`, `environment.yml`) Graphyne после вопроса ставит их собственным инструментом:
+  `poetry install`, `pdm sync`, `pipenv sync --dev`, `conda env create / update` (подойдут и
+  mamba / micromamba) — и дальше Run, отладка, pyright и терминалы работают в окружении, которое
+  сделал инструмент, где бы оно ни лежало (для conda в PATH добавляются её папки с DLL, как после
+  `conda activate`). Poetry, PDM и Pipenv ставить не нужно — Graphyne запускает их через uv; conda
+  должна быть установлена (Miniforge или micromamba).
 - **uv по умолчанию** — окружения создаются и пакеты ставятся через [uv](https://docs.astral.sh/uv/),
   это в разы быстрее pip. Если uv не установлен, Graphyne при первой надобности скачивает свою
   копию (около 15 МБ, сверяет SHA-256), без интернета работает pip. Проект остаётся обычным
