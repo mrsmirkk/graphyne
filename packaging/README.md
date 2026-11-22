@@ -28,9 +28,12 @@
 - **Python** — достаточно установленного Python 3: когда в проекте появляется `.py`-файл (или при
   первом Run / Debug), Graphyne сам создаёт `.venv` и ставит туда `debugpy`; Run, Debug, pyright и
   встроенные терминалы используют этот `.venv` — `pip install` в терминале ставит пакет туда же,
-  откуда его возьмёт Run. Если есть `requirements.txt`, Graphyne спрашивает, установить ли пакеты
-  (Install / Not now / Don't ask again) — без согласия ничего не ставит; после изменения файла
-  спросит снова. Проекты Poetry / Pipenv / conda не трогает. Выключается в Settings → Run & Debug.
+  откуда его возьмёт Run. Пакеты проекта — из `requirements.txt`, а если его нет, из
+  `dependencies` в `pyproject.toml` (вместе с группой `dev`, как делает uv) — Graphyne ставит в
+  `.venv` только после вопроса (Install / Not now / Don't ask again): без согласия ничего не
+  ставит, а когда список пакетов меняется — спросит снова (смена номера версии проекта не в счёт).
+  Если есть `uv.lock` и установлен uv — через `uv sync`, иначе через pip. Проекты Poetry
+  (`poetry.lock`) / Pipenv / conda не трогает. Выключается в Settings → Run & Debug.
 - **Выбор интерпретатора Python** — клик по версии Python справа в строке состояния (или
   «Python: Select Interpreter…» в поиске действий). В списке — окружения проекта, все Python,
   которые знает `py`, окружения conda и `python` из PATH. Там же «Create / Recreate .venv with

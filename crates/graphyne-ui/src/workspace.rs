@@ -158,12 +158,12 @@ pub struct Workspace {
     dragging: Option<Splitter>,
     py_env: PyEnv,
     after_env: Vec<AfterEnv>,
-    /// requirements.txt isn't installed in .venv: ask (packages it lists, whether an earlier
-    /// version was installed).
-    ask_requirements: Option<(usize, bool)>,
-    /// "Not now" — no more asking this session unless requirements.txt changes.
+    /// The project's package list (requirements.txt / pyproject.toml) isn't installed in .venv:
+    /// ask (packages it lists, whether an earlier version was installed, the file, uv sync).
+    ask_requirements: Option<(usize, bool, graphyne_core::python_env::DepsFile, bool)>,
+    /// "Not now" — no more asking this session unless the package list changes.
     requirements_snoozed: bool,
-    /// Background pip install of requirements.txt (status bar text).
+    /// Background install of the project's packages (status bar text).
     pip_status: Option<SharedString>,
     /// The project's Python as the status bar shows it ("Python 3.12.4 (.venv)").
     python_label: Option<SharedString>,
@@ -669,7 +669,7 @@ impl Workspace {
                 d.update(cx, |d, cx| d.refresh(cx));
             }
         }
-        if files.iter().any(|p| *p == self.root.join("requirements.txt")) {
+        if ["requirements.txt", "pyproject.toml", "uv.lock"].iter().any(|f| files.contains(&self.root.join(f))) {
             self.requirements_snoozed = false;
             self.check_requirements(cx);
         }
@@ -1196,7 +1196,7 @@ impl Workspace {
                         let (label, detail): (SharedString, SharedString) = if !has_venv {
                             (format!("Create .venv with Python {}", i.version).into(), "a virtual environment in the project folder, used from then on".into())
                         } else if confirming {
-                            ("Click again to replace .venv".into(), "the current .venv goes to the Recycle Bin; packages are installed again from requirements.txt".into())
+                            ("Click again to replace .venv".into(), "the current .venv goes to the Recycle Bin; the project's packages can be installed again".into())
                         } else {
                             (format!("Recreate .venv with Python {}", i.version).into(), "the current .venv goes to the Recycle Bin".into())
                         };
@@ -1223,8 +1223,8 @@ impl Workspace {
         Some(panel)
     }
 
-    /// Does .venv lack the packages from requirements.txt? Then ask (never install unasked:
-    /// installing runs the packages' code).
+    /// Does .venv lack the packages from requirements.txt / pyproject.toml? Then ask (never
+    /// install unasked: installing runs the packages' code).
     fn check_requirements(&mut self, cx: &mut Context<Self>) {
         if self.requirements_snoozed || self.pip_status.is_some() {
             return;
@@ -1234,7 +1234,7 @@ impl Workspace {
             let state = cx.background_spawn(async move { graphyne_core::python_env::requirements(&root) }).await;
             this.update(cx, |this, cx| {
                 this.ask_requirements = match state {
-                    graphyne_core::python_env::Requirements::Ask { packages, changed } if !this.requirements_snoozed => Some((packages, changed)),
+                    graphyne_core::python_env::Requirements::Ask { packages, changed, file, uv } if !this.requirements_snoozed => Some((packages, changed, file, uv)),
                     _ => None,
                 };
                 cx.notify();
@@ -1245,8 +1245,12 @@ impl Workspace {
     }
 
     fn install_requirements(&mut self, cx: &mut Context<Self>) {
-        self.ask_requirements = None;
-        self.pip_status = Some("Python: installing requirements.txt…".into());
+        let how = match self.ask_requirements.take() {
+            Some((_, _, _, true)) => "Python: uv sync…".to_string(),
+            Some((_, _, file, _)) => format!("Python: installing the packages from {}…", file.name()),
+            None => "Python: installing packages…".to_string(),
+        };
+        self.pip_status = Some(how.into());
         cx.notify();
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
@@ -1254,8 +1258,8 @@ impl Workspace {
             this.update(cx, |this, cx| {
                 this.pip_status = None;
                 match result {
-                    Ok(()) => {
-                        this.notify_user("Python: installed the packages from requirements.txt into .venv.", false, cx);
+                    Ok(file) => {
+                        this.notify_user(format!("Python: installed the packages from {} into .venv.", file.name()), false, cx);
                         if let Some(client) = this.lsp_store.read(cx).client_for(LanguageId::Python) {
                             client.notify("workspace/didChangeConfiguration", serde_json::json!({ "settings": {} }));
                         }
@@ -1273,9 +1277,10 @@ impl Workspace {
         .detach();
     }
 
-    /// The question about requirements.txt (bottom right, until answered).
+    /// The question about the project's packages (bottom right, until answered).
     fn render_requirements_ask(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let (packages, changed) = self.ask_requirements?;
+        let (packages, changed, file, uv) = self.ask_requirements?;
+        let name = file.name();
         let button = |id: &'static str, label: &'static str, primary: bool| {
             div()
                 .id(id)
@@ -1292,10 +1297,11 @@ impl Workspace {
                 .child(label)
         };
         let what = if packages == 1 { "1 package".to_string() } else { format!("{packages} packages") };
+        let with = if uv { " with uv sync (uv.lock)" } else { "" };
         let text = if changed {
-            format!("requirements.txt changed ({what}). Install it into .venv? Installing runs the packages' setup code — do it for projects you trust.")
+            format!("The packages in {name} changed ({what}). Install them into .venv{with}? Installing runs the packages' setup code — do it for projects you trust.")
         } else {
-            format!("requirements.txt lists {what} that .venv doesn't have yet. Installing runs their setup code — do it for projects you trust.")
+            format!("{name} lists {what} that .venv doesn't have yet. Install them{with}? Installing runs their setup code — do it for projects you trust.")
         };
         Some(
             div()
@@ -1319,7 +1325,7 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .gap(px(8.))
-                        .child(crate::file_icons::file_icon(std::path::Path::new("requirements.txt")))
+                        .child(crate::file_icons::file_icon(std::path::Path::new(name)))
                         .child(div().text_color(color(c::TEXT)).font_weight(gpui::FontWeight::MEDIUM).child("Install Python packages?")),
                 )
                 .child(div().text_color(color(c::TEXT_MUTED)).child(text))

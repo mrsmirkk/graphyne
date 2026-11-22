@@ -352,20 +352,37 @@ pub fn pip_package(module: &str) -> &str {
     }
 }
 
-/// What to do about the project's `requirements.txt`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Requirements {
-    /// No `requirements.txt`, or no `.venv` to install into.
-    NotApplicable,
-    /// Installed (or declined) for this exact version of the file.
-    UpToDate,
-    /// Not installed yet: ask. `packages` = lines naming a package; `changed` = an earlier
-    /// version of the file was installed.
-    Ask { packages: usize, changed: bool },
+/// Where a project lists the packages it needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DepsFile {
+    Requirements,
+    Pyproject,
 }
 
-/// `.venv/.graphyne-requirements`: hashes of the requirements.txt Graphyne installed or the
-/// user declined, so the question comes back only when the file changes.
+impl DepsFile {
+    pub fn name(self) -> &'static str {
+        match self {
+            DepsFile::Requirements => "requirements.txt",
+            DepsFile::Pyproject => "pyproject.toml",
+        }
+    }
+}
+
+/// What to do about the packages the project lists (`requirements.txt`, else the
+/// dependencies in `pyproject.toml`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Requirements {
+    /// Nothing listed, or no virtualenv to install into.
+    NotApplicable,
+    /// Installed (or declined) for this exact list.
+    UpToDate,
+    /// Not installed yet: ask. `packages` = how many are listed; `changed` = an earlier
+    /// version of the list was installed; `uv` = installed with `uv sync` (uv.lock).
+    Ask { packages: usize, changed: bool, file: DepsFile, uv: bool },
+}
+
+/// `.venv/.graphyne-requirements`: hashes of the package lists Graphyne installed or the
+/// user declined, so the question comes back only when the list changes.
 fn marker(venv: &Path) -> PathBuf {
     venv.join(".graphyne-requirements")
 }
@@ -397,46 +414,116 @@ pub fn package_lines(text: &str) -> usize {
     text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('-')).count()
 }
 
-/// The virtual environment requirements.txt goes into: the one Run uses (never a Python
+/// The packages a `pyproject.toml` needs (PEP 508 strings as written): `[project]
+/// dependencies` and the `dev` group of `[dependency-groups]`, which uv installs by default.
+/// None when the file can't be read as TOML.
+pub fn pyproject_dependencies(text: &str) -> Option<Vec<String>> {
+    fn group(groups: &toml::Table, name: &str, out: &mut Vec<String>, depth: usize) {
+        let Some(items) = groups.get(name).and_then(|g| g.as_array()).filter(|_| depth < 8) else { return };
+        for item in items {
+            match item {
+                toml::Value::String(dep) => out.push(dep.clone()),
+                toml::Value::Table(t) => {
+                    if let Some(other) = t.get("include-group").and_then(|g| g.as_str()) {
+                        group(groups, other, out, depth + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let doc: toml::Table = toml::from_str(text).ok()?;
+    let mut deps: Vec<String> = Vec::new();
+    if let Some(list) = doc.get("project").and_then(|p| p.get("dependencies")).and_then(|d| d.as_array()) {
+        deps.extend(list.iter().filter_map(|v| v.as_str()).map(str::to_string));
+    }
+    if let Some(groups) = doc.get("dependency-groups").and_then(|g| g.as_table()) {
+        group(groups, "dev", &mut deps, 0);
+    }
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for d in deps {
+        let d = d.trim().to_string();
+        if !d.is_empty() && !seen.contains(&d) {
+            seen.push(d.clone());
+            out.push(d);
+        }
+    }
+    Some(out)
+}
+
+/// The project's package list: requirements.txt if it names packages, else pyproject.toml.
+struct Deps {
+    file: DepsFile,
+    /// pyproject.toml's packages (requirements.txt goes to pip as a file).
+    packages: Vec<String>,
+    count: usize,
+    /// Of the list itself (a new version number in pyproject.toml doesn't ask again).
+    hash: String,
+}
+
+fn project_deps(root: &Path) -> Option<Deps> {
+    if let Ok(text) = std::fs::read_to_string(root.join("requirements.txt")) {
+        let count = package_lines(&text);
+        if count > 0 {
+            return Some(Deps { file: DepsFile::Requirements, packages: Vec::new(), count, hash: content_hash(&text) });
+        }
+    }
+    let text = std::fs::read_to_string(root.join("pyproject.toml")).ok()?;
+    let packages = pyproject_dependencies(&text)?;
+    if packages.is_empty() {
+        return None;
+    }
+    let hash = content_hash(&format!("pyproject\n{}", packages.join("\n")));
+    Some(Deps { file: DepsFile::Pyproject, count: packages.len(), packages, hash })
+}
+
+/// The virtual environment the packages go into: the one Run uses (never a Python
 /// installation picked in the status bar).
 fn active_venv(root: &Path) -> Option<PathBuf> {
     interpreter(root).and_then(|p| venv_of(&p))
 }
 
+/// A uv project (uv.lock) whose environment is the project's `.venv`, with uv installed:
+/// `uv sync` installs exactly the locked versions.
+fn uses_uv(root: &Path, venv: &Path) -> bool {
+    root.join("uv.lock").is_file() && crate::session::same_path(venv, &root.join(".venv")) && crate::toolchain::which("uv").is_some()
+}
+
 pub fn requirements(root: &Path) -> Requirements {
-    let (Some(venv), Ok(text)) = (active_venv(root), std::fs::read_to_string(root.join("requirements.txt"))) else {
+    let (Some(venv), Some(deps)) = (active_venv(root), project_deps(root)) else {
         return Requirements::NotApplicable;
     };
-    let packages = package_lines(&text);
-    if packages == 0 {
-        return Requirements::NotApplicable;
-    }
-    let hash = content_hash(&text);
     let m = read_marker(&venv);
-    if m["installed"] == hash.as_str() || m["declined"] == hash.as_str() {
+    if m["installed"] == deps.hash.as_str() || m["declined"] == deps.hash.as_str() {
         return Requirements::UpToDate;
     }
-    Requirements::Ask { packages, changed: m["installed"].is_string() }
+    let uv = deps.file == DepsFile::Pyproject && uses_uv(root, &venv);
+    Requirements::Ask { packages: deps.count, changed: m["installed"].is_string(), file: deps.file, uv }
 }
 
-/// `pip install -r requirements.txt` into the project's `.venv` (this runs the packages'
-/// install code — only after the user agreed).
-pub fn install_requirements(root: &Path) -> Result<(), String> {
+/// Install the project's packages into its virtualenv: `pip install -r requirements.txt`,
+/// `uv sync` for a uv project, else pip with pyproject.toml's dependencies. This runs the
+/// packages' install code — only after the user agreed.
+pub fn install_requirements(root: &Path) -> Result<DepsFile, String> {
     let venv = active_venv(root).ok_or("the project has no .venv")?;
+    let deps = project_deps(root).ok_or("the project lists no packages")?;
     let python = venv_python(&venv);
-    let text = std::fs::read_to_string(root.join("requirements.txt")).map_err(|e| format!("requirements.txt: {e}"))?;
-    run(
-        command(&python).args(["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--timeout", "60", "-r", "requirements.txt"]).current_dir(root),
-        "installing requirements.txt",
-    )?;
-    write_marker(&venv, "installed", &content_hash(&text));
-    Ok(())
+    let pip = ["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--timeout", "60"];
+    match deps.file {
+        DepsFile::Requirements => run(command(&python).args(pip).args(["-r", "requirements.txt"]).current_dir(root), "installing requirements.txt")?,
+        // --inexact: keep what isn't in the lock (debugpy).
+        DepsFile::Pyproject if uses_uv(root, &venv) => run(command(Path::new("uv")).args(["sync", "--inexact"]).current_dir(root), "uv sync")?,
+        DepsFile::Pyproject => run(command(&python).args(pip).args(&deps.packages).current_dir(root), "installing the packages from pyproject.toml")?,
+    }
+    write_marker(&venv, "installed", &deps.hash);
+    Ok(deps.file)
 }
 
-/// "Don't ask again" — until requirements.txt changes.
+/// "Don't ask again" — until the list changes.
 pub fn decline_requirements(root: &Path) {
-    if let (Some(venv), Ok(text)) = (active_venv(root), std::fs::read_to_string(root.join("requirements.txt"))) {
-        write_marker(&venv, "declined", &content_hash(&text));
+    if let (Some(venv), Some(deps)) = (active_venv(root), project_deps(root)) {
+        write_marker(&venv, "declined", &deps.hash);
     }
 }
 
@@ -515,6 +602,44 @@ mod tests {
     }
 
     #[test]
+    fn pyproject_dependencies_are_read() {
+        let text = r#"
+[project]
+name = "app"
+version = "0.1.0"
+dependencies = ["requests>=2.31", "rich", "numpy; python_version >= '3.10'"]
+
+[project.optional-dependencies]
+docs = ["mkdocs"]
+
+[dependency-groups]
+dev = ["pytest>=8", { include-group = "lint" }, "rich"]
+lint = ["ruff"]
+"#;
+        assert_eq!(
+            pyproject_dependencies(text).unwrap(),
+            vec!["requests>=2.31", "rich", "numpy; python_version >= '3.10'", "pytest>=8", "ruff"]
+        );
+        assert_eq!(pyproject_dependencies("[tool.black]\nline-length = 100\n").unwrap(), Vec::<String>::new());
+        assert_eq!(pyproject_dependencies("not = [toml"), None);
+
+        // Asked for when there is no requirements.txt; a new version number doesn't ask again.
+        let root = std::env::temp_dir().join(format!("graphyne-pyproject-test-{}", std::process::id()));
+        let python = venv_python(&root.join(".venv"));
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(root.join(".venv").join("pyvenv.cfg"), "").unwrap();
+        std::fs::write(&python, "").unwrap();
+        std::fs::write(root.join("pyproject.toml"), text).unwrap();
+        assert!(matches!(requirements(&root), Requirements::Ask { packages: 5, file: DepsFile::Pyproject, uv: false, .. }));
+        decline_requirements(&root);
+        std::fs::write(root.join("pyproject.toml"), text.replace("0.1.0", "0.2.0")).unwrap();
+        assert_eq!(requirements(&root), Requirements::UpToDate);
+        std::fs::write(root.join("pyproject.toml"), text.replace("\"rich\", \"numpy", "\"rich\", \"httpx\", \"numpy")).unwrap();
+        assert!(matches!(requirements(&root), Requirements::Ask { packages: 6, .. }));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn requirements_are_asked_once_per_version() {
         let root = std::env::temp_dir().join(format!("graphyne-req-test-{}", std::process::id()));
         std::fs::create_dir_all(root.join(".venv")).unwrap();
@@ -529,14 +654,14 @@ requests>=2
 
 flask
 ").unwrap();
-        assert_eq!(requirements(&root), Requirements::Ask { packages: 2, changed: false });
+        assert_eq!(requirements(&root), Requirements::Ask { packages: 2, changed: false, file: DepsFile::Requirements, uv: false });
         decline_requirements(&root);
         assert_eq!(requirements(&root), Requirements::UpToDate);
         std::fs::write(root.join("requirements.txt"), "requests>=2
 flask
 rich
 ").unwrap();
-        assert_eq!(requirements(&root), Requirements::Ask { packages: 3, changed: false }, "asked again after a change");
+        assert_eq!(requirements(&root), Requirements::Ask { packages: 3, changed: false, file: DepsFile::Requirements, uv: false }, "asked again after a change");
         std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -127,9 +127,12 @@ single portable `.exe`.
   *Install package "…"*, which runs pip for the project's interpreter in a terminal tab (common
   name differences are known: `cv2` → `opencv-python`, `PIL` → `pillow`, `yaml` → `pyyaml`, …).
   After pip finishes, the import is checked again by itself.
-- If there is a `requirements.txt`, Graphyne **asks** before installing it (Install / Not now /
-  Don't ask again) and asks again when the file changes. Poetry, Pipenv and conda projects are left
-  to their own tools.
+- The project's packages — `requirements.txt`, or else the `dependencies` of `pyproject.toml`
+  (with its `dev` dependency group, as uv does) — are installed into `.venv` after Graphyne
+  **asks** (Install / Not now / Don't ask again); it asks again when the list changes, not when
+  only the version number does. Projects with `uv.lock` are installed with `uv sync` when uv is
+  installed, others with pip. Poetry (`poetry.lock`), Pipenv and conda projects are left to their
+  own tools.
 
 ### Terminal
 - Built-in terminal with tabs, scrollback, selection, clickable `file:line` links, and a
@@ -217,7 +220,8 @@ Planned, roughly in this order:
       editing tables and query results, export and CSV import are done).
 - [ ] **Debugging beyond Python and JavaScript** verified end to end: Rust / C / C++ (`lldb-dap`),
       Go (`delve`).
-- [ ] **Python**: dependencies from `pyproject.toml` (uv, Poetry, PDM).
+- [ ] **Python**: Poetry and PDM projects (their lock files); `uv sync` is wired up but not yet
+      verified.
 - [ ] **macOS and Linux** builds (GPUI supports both; Graphyne isn't tested there yet).
 - [ ] **Faster start-up** — most of today's ~0.4 s goes to Direct3D initialization.
 - [ ] Easier extension install (from a URL or a gallery).
