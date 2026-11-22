@@ -51,6 +51,10 @@ pub struct Settings {
     /// Python file is added or run.
     #[serde(rename = "python.auto_environment")]
     pub python_auto_env: bool,
+    /// Install Python packages and create environments with uv (downloaded the first time if
+    /// it isn't installed); off: pip only.
+    #[serde(rename = "python.use_uv")]
+    pub python_uv: bool,
     /// Reopen the last session's projects on launch (off: always the Welcome screen).
     #[serde(rename = "startup.reopen_projects")]
     pub reopen_projects: bool,
@@ -75,6 +79,7 @@ impl Default for Settings {
             shell: "auto".into(),
             reopen_projects: true,
             python_auto_env: true,
+            python_uv: true,
             keymap: Default::default(),
         }
     }

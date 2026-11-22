@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Folders recognised as the project's virtual environment (must contain `pyvenv.cfg`).
 pub const VENV_DIRS: [&str; 3] = [".venv", "venv", "env"];
@@ -57,23 +58,243 @@ pub fn venv_of(python: &Path) -> Option<PathBuf> {
 /// Variables and folders (to put first on PATH) for a terminal of this project, so `python`
 /// and `pip` typed there are the project's interpreter — like an activated virtualenv.
 pub fn terminal_env(root: &Path) -> (Vec<(String, String)>, Vec<PathBuf>) {
-    let Some(python) = interpreter(root) else { return Default::default() };
-    let Some(bin) = python.parent().map(Path::to_path_buf) else { return Default::default() };
-    match venv_of(&python) {
-        Some(venv) => {
-            let name = venv.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            (vec![("VIRTUAL_ENV".into(), venv.to_string_lossy().to_string()), ("VIRTUAL_ENV_PROMPT".into(), name)], vec![bin])
-        }
-        None => {
-            // A Python installation: pip and other tools live in its Scripts folder.
-            let scripts = bin.join("Scripts");
-            let mut dirs = vec![bin];
-            if cfg!(windows) && scripts.is_dir() {
-                dirs.push(scripts);
+    let (vars, mut dirs) = match interpreter(root) {
+        Some(python) => {
+            let bin = python.parent().map(Path::to_path_buf).unwrap_or_default();
+            match venv_of(&python) {
+                Some(venv) => {
+                    let name = venv.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    (vec![("VIRTUAL_ENV".into(), venv.to_string_lossy().to_string()), ("VIRTUAL_ENV_PROMPT".into(), name)], vec![bin])
+                }
+                None => {
+                    // A Python installation: pip and other tools live in its Scripts folder.
+                    let scripts = bin.join("Scripts");
+                    let mut dirs = vec![bin];
+                    if cfg!(windows) && scripts.is_dir() {
+                        dirs.push(scripts);
+                    }
+                    (Vec::new(), dirs)
+                }
             }
-            (Vec::new(), dirs)
+        }
+        None => Default::default(),
+    };
+    // The uv Graphyne uses, when it isn't on PATH anyway (its own copy): `uv` works there too.
+    if let Some(dir) = private_uv().and_then(|p| p.parent().map(Path::to_path_buf)) {
+        dirs.push(dir);
+    }
+    (vars, dirs)
+}
+
+// ---------------------------------------------------------------- uv and pip
+
+/// The uv Graphyne downloads when none is installed (official release, checked by SHA-256).
+pub const UV_VERSION: &str = "0.13.9";
+const UV_SHA256: &str = "edd61f7f5728a56cc62455386661860bdfc7bab65872f39b0c25bdcc1d8e1beb";
+
+static UV_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Settings → "Use uv". Off: pip everywhere, and uv is never downloaded.
+pub fn set_uv_enabled(on: bool) {
+    UV_ENABLED.store(on, Ordering::Relaxed);
+}
+
+pub fn uv_enabled() -> bool {
+    UV_ENABLED.load(Ordering::Relaxed)
+}
+
+fn own_uv_dir() -> Option<PathBuf> {
+    Some(crate::session::state_dir()?.join("tools").join(format!("uv-{UV_VERSION}")))
+}
+
+/// Graphyne's copy of uv, when downloaded.
+fn own_uv() -> Option<PathBuf> {
+    let p = own_uv_dir()?.join(if cfg!(windows) { "uv.exe" } else { "uv" });
+    p.is_file().then_some(p)
+}
+
+/// uv that isn't on PATH: `GRAPHYNE_UV_PATH` or Graphyne's copy.
+fn private_uv() -> Option<PathBuf> {
+    match std::env::var_os("GRAPHYNE_UV_PATH").filter(|p| !p.is_empty()) {
+        Some(p) => Some(PathBuf::from(p)).filter(|p| p.is_file()),
+        None => own_uv().filter(|_| crate::toolchain::which("uv").is_none()),
+    }
+}
+
+/// uv on this computer, without downloading anything: `GRAPHYNE_UV_PATH`, `uv` on PATH or
+/// Graphyne's copy.
+pub fn find_uv() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("GRAPHYNE_UV_PATH").filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(p)).filter(|p| p.is_file());
+    }
+    crate::toolchain::which("uv").or_else(own_uv)
+}
+
+/// uv, downloading Graphyne's copy (about 15 MB) the first time it's needed.
+pub fn get_uv(progress: &dyn Fn(Step)) -> Result<PathBuf, String> {
+    if let Some(uv) = find_uv() {
+        return Ok(uv);
+    }
+    if std::env::var_os("GRAPHYNE_UV_PATH").is_some_and(|p| !p.is_empty()) {
+        return Err("GRAPHYNE_UV_PATH doesn't point to uv".into());
+    }
+    if !(cfg!(windows) && cfg!(target_arch = "x86_64")) {
+        return Err("uv is not installed (docs.astral.sh/uv)".into());
+    }
+    let dir = own_uv_dir().ok_or("no folder for Graphyne's state")?;
+    progress(Step::DownloadingUv);
+    let url = format!("https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/uv-x86_64-pc-windows-msvc.zip");
+    let staging = crate::download::fetch_unpacked(&url, UV_SHA256, &dir).map_err(|e| format!("could not download uv {UV_VERSION} ({e})"))?;
+    for name in ["uv.exe", "uvx.exe", "uvw.exe"] {
+        let _ = std::fs::rename(staging.join(name), dir.join(name));
+    }
+    let _ = std::fs::remove_dir_all(&staging);
+    own_uv().ok_or_else(|| "the uv download has no uv.exe".into())
+}
+
+/// The tool that installs a project's packages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Installer {
+    Uv,
+    Pip,
+}
+
+impl Installer {
+    pub fn name(self) -> &'static str {
+        match self {
+            Installer::Uv => "uv",
+            Installer::Pip => "pip",
         }
     }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "uv" => Some(Installer::Uv),
+            "pip" => Some(Installer::Pip),
+            _ => None,
+        }
+    }
+}
+
+/// Installers picked in the status-bar menu, per project root (kept in its saved state).
+static INSTALLERS: Mutex<Vec<(PathBuf, Installer)>> = Mutex::new(Vec::new());
+
+pub fn set_installer_choice(root: &Path, choice: Option<Installer>) {
+    let mut all = INSTALLERS.lock().unwrap_or_else(|e| e.into_inner());
+    all.retain(|(r, _)| !crate::session::same_path(r, root));
+    if let Some(choice) = choice {
+        all.push((root.to_path_buf(), choice));
+    }
+}
+
+pub fn installer_choice(root: &Path) -> Option<Installer> {
+    INSTALLERS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(r, _)| crate::session::same_path(r, root)).map(|(_, i)| *i)
+}
+
+/// Does a pip config file point pip to a package source of its own?
+pub fn pip_config_sets_index(text: &str) -> bool {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#') && !l.starts_with(';'))
+        .filter_map(|l| l.split_once('=').map(|(k, _)| k.trim().to_ascii_lowercase()))
+        .any(|k| matches!(k.as_str(), "index-url" | "extra-index-url" | "find-links" | "no-index"))
+}
+
+/// pip is set up with its own package source (a company index, a local folder) that uv
+/// doesn't read — and uv has none of its own. Says where.
+fn pip_own_index() -> Option<&'static str> {
+    let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+    if ["UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX", "UV_EXTRA_INDEX_URL", "UV_FIND_LINKS", "UV_NO_INDEX"].iter().any(|k| set(k)) {
+        return None;
+    }
+    if ["PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS", "PIP_NO_INDEX"].iter().any(|k| set(k)) {
+        return Some("environment");
+    }
+    let var = |k: &str| std::env::var_os(k).map(PathBuf::from);
+    let files: Vec<PathBuf> = if cfg!(windows) {
+        [var("PIP_CONFIG_FILE"), var("APPDATA").map(|d| d.join("pip").join("pip.ini")), var("USERPROFILE").map(|d| d.join("pip").join("pip.ini")), var("PROGRAMDATA").map(|d| d.join("pip").join("pip.ini"))]
+            .into_iter()
+            .flatten()
+            .collect()
+    } else {
+        [var("PIP_CONFIG_FILE"), var("HOME").map(|d| d.join(".config").join("pip").join("pip.conf")), var("HOME").map(|d| d.join(".pip").join("pip.conf")), Some(PathBuf::from("/etc/pip.conf"))]
+            .into_iter()
+            .flatten()
+            .collect()
+    };
+    files.iter().any(|f| std::fs::read_to_string(f).is_ok_and(|t| pip_config_sets_index(&t))).then_some("pip.ini")
+}
+
+/// What installs packages when nothing was picked for the project, and why.
+pub fn auto_installer() -> (Installer, &'static str) {
+    if !uv_enabled() {
+        return (Installer::Pip, "uv is turned off in Settings");
+    }
+    match pip_own_index() {
+        Some("environment") => (Installer::Pip, "PIP_INDEX_URL / PIP_FIND_LINKS give pip its own package source, which uv doesn't read"),
+        Some(_) => (Installer::Pip, "pip.ini gives pip its own package source, which uv doesn't read"),
+        None => (Installer::Uv, "much faster than pip; pip is used when uv can't be"),
+    }
+}
+
+/// The project's installer: picked in the menu, else the automatic one.
+pub fn installer(root: &Path) -> Installer {
+    installer_choice(root).unwrap_or_else(|| auto_installer().0)
+}
+
+/// uv for this project if it uses uv (downloaded when needed). None: use pip — with the reason
+/// uv couldn't be had, when it was wanted.
+fn uv_for(root: &Path, progress: &dyn Fn(Step)) -> (Option<PathBuf>, Option<String>) {
+    if installer(root) != Installer::Uv {
+        return (None, None);
+    }
+    match get_uv(progress) {
+        Ok(uv) => (Some(uv), None),
+        Err(e) => (None, Some(e)),
+    }
+}
+
+/// `uv pip install --python <python>` or `<python> -m pip install`, ready for package arguments.
+fn install_command(uv: Option<&Path>, python: &Path) -> Command {
+    match uv {
+        Some(uv) => {
+            let mut cmd = command(uv);
+            cmd.args(["pip", "install", "--python"]).arg(python);
+            cmd
+        }
+        None => {
+            let mut cmd = command(python);
+            cmd.args(["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--timeout", "60"]);
+            cmd
+        }
+    }
+}
+
+/// The program and arguments the "Install package" quick fix runs in a terminal tab (the
+/// package name goes last): uv when the project uses it and it's here, else pip.
+pub fn install_package_command(root: &Path, python: &Path) -> (PathBuf, Vec<String>) {
+    match find_uv().filter(|_| installer(root) == Installer::Uv) {
+        Some(uv) => (uv, vec!["pip".into(), "install".into(), "--python".into(), python.to_string_lossy().to_string()]),
+        None => (python.to_path_buf(), vec!["-m".into(), "pip".into(), "install".into()]),
+    }
+}
+
+/// Python versions offered for "Install Python 3.x" (uv downloads them).
+pub const PYTHON_VERSIONS: [&str; 4] = ["3.13", "3.12", "3.11", "3.10"];
+
+/// Install a Python version with uv (into uv's own folder, not the system).
+pub fn install_python(version: &str, progress: &dyn Fn(Step)) -> Result<(), String> {
+    let uv = get_uv(progress)?;
+    progress(Step::InstallingPython);
+    run(command(&uv).args(["python", "install", version]), &format!("installing Python {version}"))
+}
+
+/// Pythons uv installed (`uv python install`), for the interpreter list.
+fn uv_pythons() -> Vec<PathBuf> {
+    let Some(uv) = find_uv() else { return Vec::new() };
+    let Ok(out) = command(&uv).args(["python", "list", "--only-installed", "--output-format", "json"]).output() else { return Vec::new() };
+    let Ok(list) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else { return Vec::new() };
+    list.as_array().into_iter().flatten().filter_map(|p| p["path"].as_str()).map(PathBuf::from).filter(|p| p.is_file()).collect()
 }
 
 /// A Python found on this computer.
@@ -172,6 +393,7 @@ pub fn discover(root: &Path) -> Vec<Interpreter> {
     }
     paths.extend(conda_envs());
     paths.extend(on_path());
+    paths.extend(uv_pythons());
     jobs.extend(paths.iter().map(|p| command(p)));
     let found: Vec<Option<Interpreter>> = std::thread::scope(|s| {
         let handles: Vec<_> = jobs.into_iter().map(|cmd| s.spawn(move || probe(cmd))).collect();
@@ -231,27 +453,56 @@ pub fn has_module(python: &Path, module: &str) -> bool {
     command(python).args(["-c", &format!("import {module}")]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
+/// A package that has to be compiled here, without a C/C++ compiler: what to do about it.
+pub fn build_tools_hint(output: &str) -> Option<&'static str> {
+    let s = output.to_ascii_lowercase();
+    (s.contains("microsoft visual c++") || s.contains("vcvarsall") || s.contains("unable to find a compiler") || s.contains("link.exe") && s.contains("not found"))
+        .then_some("A package has to be compiled on this computer and needs Microsoft C++ Build Tools (visualstudio.microsoft.com/visual-cpp-build-tools). Or create .venv with an older Python the package has ready-made builds for (status bar → Python).")
+}
+
+/// The line of an installer's error output that says what went wrong. uv: `error: …` /
+/// `cause: Because …` / `hint: …` (on a console `╰─▶ Because …`) — the cause says the most.
+/// pip: its last line.
+pub fn error_line(stderr: &str) -> String {
+    let clean = |l: &str| l.trim().trim_start_matches(['×', '╰', '─', '▶', '│', ' ']).trim().to_string();
+    let lines: Vec<String> = stderr.lines().map(clean).filter(|l| !l.is_empty()).collect();
+    lines
+        .iter()
+        .rev()
+        .find(|l| l.starts_with("cause:") || l.starts_with("Because "))
+        .or_else(|| lines.iter().rev().find(|l| !l.starts_with("hint:") && !l.starts_with("help:")))
+        .map(|l| l.trim_start_matches("cause:").trim().to_string())
+        .unwrap_or_else(|| "failed".into())
+}
+
 fn run(cmd: &mut Command, what: &str) -> Result<(), String> {
     let out = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("{what}: {e}"))?;
     if out.status.success() {
         return Ok(());
     }
     let err = String::from_utf8_lossy(&out.stderr);
-    let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("failed").trim().to_string();
-    Err(format!("{what}: {last}"))
+    let last = error_line(&err);
+    match build_tools_hint(&err) {
+        Some(hint) => Err(format!("{what}: {last} {hint}")),
+        None => Err(format!("{what}: {last}")),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
+    DownloadingUv,
     RemovingVenv,
     CreatingVenv,
     InstallingDebugpy,
+    InstallingPackages,
+    InstallingPython,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
-    /// Environment ready; says what had to be done (nothing when it was already there).
-    Ready { python: PathBuf, created_venv: bool, installed_debugpy: bool },
+    /// Environment ready; says what had to be done (nothing when it was already there), and
+    /// why uv couldn't be used when it was wanted (pip was).
+    Ready { python: PathBuf, created_venv: bool, installed_debugpy: bool, uv_note: Option<String> },
     /// Poetry / Pipenv / conda project — left to that tool.
     ManagedElsewhere(&'static str),
 }
@@ -261,34 +512,59 @@ pub enum Outcome {
 pub fn ensure(root: &Path, progress: impl Fn(Step)) -> Result<Outcome, String> {
     let picked = chosen(root).filter(|p| p.is_file());
     if let Some(python) = picked.as_ref().filter(|p| venv_of(p).is_none()) {
-        return Ok(Outcome::Ready { python: python.clone(), created_venv: false, installed_debugpy: false });
+        return Ok(Outcome::Ready { python: python.clone(), created_venv: false, installed_debugpy: false, uv_note: None });
     }
-    let (python, created_venv) = match picked.or_else(|| project_python(root)) {
+    let existing = picked.or_else(|| project_python(root));
+    let needs_debugpy = existing.as_ref().is_none_or(|p| !has_module(p, "debugpy"));
+    if existing.is_none() {
+        if let Some(tool) = managed_elsewhere(root) {
+            return Ok(Outcome::ManagedElsewhere(tool));
+        }
+    }
+    // uv only when there is something to do (it may have to be downloaded).
+    let (uv, uv_note) = if existing.is_none() || needs_debugpy { uv_for(root, &progress) } else { (None, None) };
+    let (python, created_venv) = match existing {
         Some(python) => (python, false),
         None => {
-            if let Some(tool) = managed_elsewhere(root) {
-                return Ok(Outcome::ManagedElsewhere(tool));
-            }
             let base = base_python().ok_or("Python 3 is not installed. Get it from python.org (or `winget install Python.Python.3.13`), then run again.")?;
             progress(Step::CreatingVenv);
-            run(command(&base).args(["-m", "venv", ".venv"]).current_dir(root), "creating .venv")?;
-            let python = venv_python(&root.join(".venv"));
-            if !python.is_file() {
-                return Err("creating .venv: no interpreter in the new environment".into());
-            }
-            (python, true)
+            (new_venv(root, &base, uv.as_deref())?, true)
         }
     };
     let mut installed_debugpy = false;
-    if !has_module(&python, "debugpy") {
+    if needs_debugpy {
         progress(Step::InstallingDebugpy);
-        run(
-            command(&python).args(["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--timeout", "30", "debugpy"]).current_dir(root),
-            "installing debugpy",
-        )?;
+        let with_uv = run(install_command(uv.as_deref(), &python).arg("debugpy").current_dir(root), "installing debugpy");
+        // uv couldn't (e.g. a source only pip knows about): pip, if the environment has it.
+        if with_uv.is_err() && uv.is_some() && has_module(&python, "pip") {
+            run(install_command(None, &python).arg("debugpy").current_dir(root), "installing debugpy")?;
+        } else {
+            with_uv?;
+        }
         installed_debugpy = true;
     }
-    Ok(Outcome::Ready { python, created_venv, installed_debugpy })
+    Ok(Outcome::Ready { python, created_venv, installed_debugpy, uv_note })
+}
+
+/// `.venv` in `root` from the installation `base`: with uv (a fraction of a second; `--seed`
+/// puts pip in, so `pip` in a terminal works), else — or when uv fails, e.g. offline —
+/// with `python -m venv`.
+fn new_venv(root: &Path, base: &Path, uv: Option<&Path>) -> Result<PathBuf, String> {
+    let dir = root.join(".venv");
+    let existed = dir.exists();
+    let by_uv = uv.is_some_and(|uv| run(command(uv).args(["venv", "--seed", "--python"]).arg(base).arg(".venv").current_dir(root), "uv venv").is_ok());
+    if !by_uv {
+        if uv.is_some() && !existed {
+            // What a failed `uv venv` left behind.
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        run(command(base).args(["-m", "venv", ".venv"]).current_dir(root), "creating .venv")?;
+    }
+    let python = venv_python(&dir);
+    if !python.is_file() {
+        return Err("creating .venv: no interpreter in the new environment".into());
+    }
+    Ok(python)
 }
 
 /// A new `.venv` for the project from `base` (a Python installation). The current `.venv`, if
@@ -300,13 +576,9 @@ pub fn create_venv(root: &Path, base: &Path, progress: impl Fn(Step)) -> Result<
         progress(Step::RemovingVenv);
         crate::fs_ops::move_to_trash(&dir).map_err(|e| format!("moving the old .venv to the Recycle Bin: {e} (is a program from it still running?)"))?;
     }
+    let (uv, _) = uv_for(root, &progress);
     progress(Step::CreatingVenv);
-    run(command(base).args(["-m", "venv", ".venv"]).current_dir(root), "creating .venv")?;
-    let python = venv_python(&dir);
-    if !python.is_file() {
-        return Err("creating .venv: no interpreter in the new environment".into());
-    }
-    Ok(python)
+    new_venv(root, base, uv.as_deref())
 }
 
 /// The top-level module of a missing import in a Pyright / Pylance diagnostic:
@@ -484,10 +756,15 @@ fn active_venv(root: &Path) -> Option<PathBuf> {
     interpreter(root).and_then(|p| venv_of(&p))
 }
 
-/// A uv project (uv.lock) whose environment is the project's `.venv`, with uv installed:
-/// `uv sync` installs exactly the locked versions.
-fn uses_uv(root: &Path, venv: &Path) -> bool {
-    root.join("uv.lock").is_file() && crate::session::same_path(venv, &root.join(".venv")) && crate::toolchain::which("uv").is_some()
+/// A uv project (uv.lock) whose environment is the project's `.venv`: `uv sync` installs
+/// exactly the locked versions — unless pip was picked for the project or uv is turned off.
+fn uses_uv_sync(root: &Path, venv: &Path) -> bool {
+    root.join("uv.lock").is_file()
+        && crate::session::same_path(venv, &root.join(".venv"))
+        && match installer_choice(root) {
+            Some(i) => i == Installer::Uv,
+            None => uv_enabled(),
+        }
 }
 
 pub fn requirements(root: &Path) -> Requirements {
@@ -498,26 +775,41 @@ pub fn requirements(root: &Path) -> Requirements {
     if m["installed"] == deps.hash.as_str() || m["declined"] == deps.hash.as_str() {
         return Requirements::UpToDate;
     }
-    let uv = deps.file == DepsFile::Pyproject && uses_uv(root, &venv);
+    let uv = deps.file == DepsFile::Pyproject && uses_uv_sync(root, &venv);
     Requirements::Ask { packages: deps.count, changed: m["installed"].is_string(), file: deps.file, uv }
 }
 
-/// Install the project's packages into its virtualenv: `pip install -r requirements.txt`,
-/// `uv sync` for a uv project, else pip with pyproject.toml's dependencies. This runs the
-/// packages' install code — only after the user agreed.
-pub fn install_requirements(root: &Path) -> Result<DepsFile, String> {
-    let venv = active_venv(root).ok_or("the project has no .venv")?;
-    let deps = project_deps(root).ok_or("the project lists no packages")?;
+/// Install the project's packages into its virtualenv: `uv sync` for a uv project (uv.lock),
+/// else requirements.txt / pyproject.toml's dependencies with the project's installer (uv or
+/// pip). This runs the packages' install code — only after the user agreed. The error comes
+/// with the installer that failed (after uv, pip may be worth a try).
+pub fn install_requirements(root: &Path, progress: impl Fn(Step)) -> Result<(DepsFile, Installer), (String, Installer)> {
+    let venv = active_venv(root).ok_or_else(|| ("the project has no .venv".to_string(), Installer::Pip))?;
+    let deps = project_deps(root).ok_or_else(|| ("the project lists no packages".to_string(), Installer::Pip))?;
     let python = venv_python(&venv);
-    let pip = ["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--timeout", "60"];
-    match deps.file {
-        DepsFile::Requirements => run(command(&python).args(pip).args(["-r", "requirements.txt"]).current_dir(root), "installing requirements.txt")?,
+    let sync = deps.file == DepsFile::Pyproject && uses_uv_sync(root, &venv);
+    let uv = if sync {
+        Some(get_uv(&progress).map_err(|e| (e, Installer::Uv))?)
+    } else {
+        uv_for(root, &progress).0
+    };
+    let used = if uv.is_some() { Installer::Uv } else { Installer::Pip };
+    progress(Step::InstallingPackages);
+    let result = match (&uv, sync) {
         // --inexact: keep what isn't in the lock (debugpy).
-        DepsFile::Pyproject if uses_uv(root, &venv) => run(command(Path::new("uv")).args(["sync", "--inexact"]).current_dir(root), "uv sync")?,
-        DepsFile::Pyproject => run(command(&python).args(pip).args(&deps.packages).current_dir(root), "installing the packages from pyproject.toml")?,
-    }
+        (Some(uv), true) => run(command(uv).args(["sync", "--inexact"]).current_dir(root), "uv sync"),
+        _ => {
+            let mut cmd = install_command(uv.as_deref(), &python);
+            match deps.file {
+                DepsFile::Requirements => cmd.args(["-r", "requirements.txt"]),
+                DepsFile::Pyproject => cmd.args(&deps.packages),
+            };
+            run(cmd.current_dir(root), &format!("installing the packages from {} with {}", deps.file.name(), used.name()))
+        }
+    };
+    result.map_err(|e| (e, used))?;
     write_marker(&venv, "installed", &deps.hash);
-    Ok(deps.file)
+    Ok((deps.file, used))
 }
 
 /// "Don't ask again" — until the list changes.
@@ -637,6 +929,25 @@ lint = ["ruff"]
         std::fs::write(root.join("pyproject.toml"), text.replace("\"rich\", \"numpy", "\"rich\", \"httpx\", \"numpy")).unwrap();
         assert!(matches!(requirements(&root), Requirements::Ask { packages: 6, .. }));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn pip_sources_and_errors() {
+        assert!(pip_config_sets_index("[global]\nindex-url = https://pypi.example.com/simple\n"));
+        assert!(pip_config_sets_index("[install]\nfind-links=C:\\wheels\n"));
+        assert!(!pip_config_sets_index("[global]\n# index-url = x\ntimeout = 60\n"));
+        assert!(build_tools_hint("error: Microsoft Visual C++ 14.0 or greater is required.").is_some());
+        assert!(build_tools_hint("No matching distribution found for foo").is_none());
+        let uv_err = "error: No solution found when resolving dependencies\n  cause: Because demo-missing was not found in the cache and you require demo-missing, we can conclude that your requirements are unsatisfiable.\nhint: Packages were unavailable because the network was disabled.\n";
+        assert!(error_line(uv_err).starts_with("Because demo-missing was not found"));
+        assert_eq!(error_line("Collecting x\nERROR: No matching distribution found for x\n"), "ERROR: No matching distribution found for x");
+        assert_eq!(Installer::from_name(Installer::Uv.name()), Some(Installer::Uv));
+        let root = Path::new("C:/some/project");
+        assert_eq!(installer_choice(root), None);
+        set_installer_choice(root, Some(Installer::Pip));
+        assert_eq!(installer(root), Installer::Pip);
+        set_installer_choice(root, None);
+        assert_eq!(installer_choice(root), None);
     }
 
     #[test]

@@ -743,12 +743,19 @@ impl Render for SettingsPage {
             .child(choice_row(false, "Shell", "Used for new terminal tabs. Automatic: PowerShell 7 if installed, else Windows PowerShell.", shell_chips));
 
         // Run & Debug
-        let run_debug = card().child(row(
-            true,
-            "Prepare Python projects",
-            "Create .venv with debugpy when a Python file is added or run, so Run and Debug just work.",
-            toggle("settings-python-env", s.python_auto_env, |s, v| s.python_auto_env = v),
-        ));
+        let run_debug = card()
+            .child(row(
+                true,
+                "Prepare Python projects",
+                "Create .venv with debugpy when a Python file is added or run, so Run and Debug just work.",
+                toggle("settings-python-env", s.python_auto_env, |s, v| s.python_auto_env = v),
+            ))
+            .child(row(
+                false,
+                "Use uv for Python packages",
+                "Much faster than pip. Downloaded the first time (about 15 MB) if it isn't installed; projects that need pip still get pip.",
+                toggle("settings-python-uv", s.python_uv, |s, v| s.python_uv = v),
+            ));
 
         // Startup
         let startup = card().child(row(

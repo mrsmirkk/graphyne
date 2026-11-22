@@ -172,6 +172,11 @@ pub struct Workspace {
     interpreters: Option<Vec<graphyne_core::python_env::Interpreter>>,
     /// "Recreate .venv with …" clicked once: the base it would use (a second click confirms).
     venv_confirm: Option<PathBuf>,
+    /// The automatic installer and why, and whether uv is on this computer (menu).
+    auto_installer: (graphyne_core::python_env::Installer, &'static str),
+    uv_here: bool,
+    /// uv couldn't install the project's packages: offer pip (the error).
+    pip_offer: Option<SharedString>,
     /// Packages changed in the project's environment: refresh the language server soon.
     packages_refresh: Option<gpui::Task<()>>,
     /// Languages of the project with a toolchain (External Libraries).
@@ -399,6 +404,9 @@ impl Workspace {
             interpreters: None,
             venv_confirm: None,
             packages_refresh: None,
+            auto_installer: graphyne_core::python_env::auto_installer(),
+            uv_here: false,
+            pip_offer: None,
             library_langs: Vec::new(),
             missing_tools: HashMap::new(),
             checked_tools: HashSet::new(),
@@ -440,6 +448,7 @@ impl Workspace {
     /// Put back the layout saved by [`Self::project_state`].
     fn apply_state(&mut self, s: ProjectState, window: &mut Window, cx: &mut Context<Self>) {
         graphyne_core::python_env::set_chosen(&self.root, s.python.clone());
+        graphyne_core::python_env::set_installer_choice(&self.root, s.python_installer.as_deref().and_then(graphyne_core::python_env::Installer::from_name));
         self.left = s.left;
         self.right = s.right;
         self.bottom = s.bottom;
@@ -503,6 +512,7 @@ impl Workspace {
             expanded: self.file_tree.read(cx).expanded_dirs(),
             db_expanded: self.db_panel.read(cx).expanded_keys(cx),
             python: graphyne_core::python_env::chosen(&self.root),
+            python_installer: graphyne_core::python_env::installer_choice(&self.root).map(|i| i.name().to_string()),
         }
     }
 
@@ -871,11 +881,17 @@ impl Workspace {
     fn finish_python_env(&mut self, result: Result<graphyne_core::python_env::Outcome, String>, window: &mut Window, cx: &mut Context<Self>) {
         use graphyne_core::python_env::Outcome;
         match result {
-            Ok(Outcome::Ready { created_venv, installed_debugpy, .. }) => {
+            Ok(Outcome::Ready { created_venv, installed_debugpy, uv_note, .. }) => {
                 self.py_env = PyEnv::Ready;
+                if let Some(note) = uv_note {
+                    self.notify_user(format!("Python: uv isn't available — {note}. pip was used instead."), false, cx);
+                }
                 self.check_requirements(cx);
                 if created_venv || !self.python_label_asked {
                     self.refresh_python_label(cx);
+                }
+                if created_venv {
+                    self.refresh_terminals(cx);
                 }
                 if created_venv || installed_debugpy {
                     let done = if created_venv { "created .venv and installed debugpy" } else { "installed debugpy into the project's environment" };
@@ -944,8 +960,18 @@ impl Workspace {
         }
         self.refresh_python_label(cx);
         self.refresh_libraries(cx);
+        self.refresh_terminals(cx);
         self.file_tree.update(cx, |t, cx| t.refresh(cx));
         cx.notify();
+    }
+
+    /// Unused shell tabs start again with the project's (new) Python; used ones are left
+    /// alone, with a note.
+    fn refresh_terminals(&mut self, cx: &mut Context<Self>) {
+        let kept = self.terminal.update(cx, |t, cx| t.refresh_untouched(cx));
+        if kept > 0 {
+            self.notify_user("Terminal tabs you have used keep the Python they started with: open a new one (Ctrl+Shift+T) for the project's.", false, cx);
+        }
     }
 
     /// External Libraries again (after the Python interpreter changed).
@@ -1095,15 +1121,20 @@ impl Workspace {
             return;
         };
         let shell = ShellKind::native();
-        let exe = graphyne_core::run::quote(shell, &python);
-        let command = if shell == ShellKind::PowerShell { format!("& {exe} -m pip install {package}") } else { format!("{exe} -m pip install {package}") };
+        let (program, args) = graphyne_core::python_env::install_package_command(&self.root, &python);
+        let with_uv = args.first().is_some_and(|a| a == "pip");
+        let mut parts = vec![graphyne_core::run::quote(shell, &program)];
+        parts.extend(args.iter().map(|a| graphyne_core::run::quote(shell, std::path::Path::new(a))));
+        parts.push(package.clone());
+        let command = if shell == ShellKind::PowerShell { format!("& {}", parts.join(" ")) } else { parts.join(" ") };
         let line = graphyne_core::run::pty_line(shell, &self.root, &command);
         if self.detached.is_none() {
             self.bottom = true;
         }
         self.bottom_view = BottomView::Terminal;
         let root = self.root.clone();
-        self.terminal.update(cx, |t, cx| t.run_in_tab(&format!("pip install {package}"), root, &line, cx));
+        let title = format!("{} install {package}", if with_uv { "uv pip" } else { "pip" });
+        self.terminal.update(cx, |t, cx| t.run_in_tab(&title, root, &line, cx));
         self.terminal.read(cx).focus_active(window, cx);
         cx.notify();
     }
@@ -1162,7 +1193,7 @@ impl Workspace {
             .right(px(12.))
             .bottom(px(theme::STATUS_BAR_HEIGHT + 2.))
             .w(px(460.))
-            .max_h(px(520.))
+            .max_h(px(640.))
             .overflow_y_scroll()
             .p(px(6.))
             .rounded(px(10.))
@@ -1214,6 +1245,47 @@ impl Workspace {
                         );
                     }
                 }
+                // Older Pythons for libraries that don't support the newest one yet.
+                let missing: Vec<&'static str> = graphyne_core::python_env::PYTHON_VERSIONS
+                    .into_iter()
+                    .filter(|v| !list.iter().any(|i| i.venv.is_none() && i.version.starts_with(&format!("{v}."))))
+                    .collect();
+                if !missing.is_empty() {
+                    panel = panel.child(section("INSTALL PYTHON"));
+                    let size = if self.uv_here { "" } else { " (uv is downloaded first, about 15 MB)" };
+                    for (ix, version) in missing.into_iter().enumerate() {
+                        panel = panel.child(
+                            row(("py-install", ix).into(), format!("Install Python {version}").into(), Some(format!("with uv, into its own folder — about 30 MB{size}").into()), false)
+                                .on_click(cx.listener(move |this, _, _, cx| this.install_python(version, cx))),
+                        );
+                    }
+                }
+            }
+        }
+        // How packages get installed.
+        {
+            use graphyne_core::python_env::Installer;
+            let choice = graphyne_core::python_env::installer_choice(&self.root);
+            let (auto, why) = self.auto_installer;
+            let uv_detail: SharedString = if self.uv_here { "fast installs".into() } else { "fast installs; downloaded the first time (about 15 MB)".into() };
+            panel = panel
+                .child(section("PACKAGE MANAGER"))
+                .child(
+                    row("py-inst-auto".into(), format!("Automatic — {}", auto.name()).into(), Some(why.into()), choice.is_none())
+                        .on_click(cx.listener(|this, _, window, cx| this.choose_installer(None, window, cx))),
+                )
+                .child(row("py-inst-uv".into(), "uv".into(), Some(uv_detail), choice == Some(Installer::Uv)).on_click(cx.listener(|this, _, window, cx| this.choose_installer(Some(Installer::Uv), window, cx))))
+                .child(
+                    row("py-inst-pip".into(), "pip".into(), Some("the standard installer that comes with Python".into()), choice == Some(Installer::Pip))
+                        .on_click(cx.listener(|this, _, window, cx| this.choose_installer(Some(Installer::Pip), window, cx))),
+                );
+            if let Some(file) = graphyne_core::python_env::managed_elsewhere(&self.root) {
+                let tool = match file {
+                    "poetry.lock" => "Poetry",
+                    "Pipfile" => "Pipenv",
+                    _ => "conda",
+                };
+                panel = panel.child(div().px(px(10.)).py(px(6.)).text_color(color(c::TEXT_DIM)).child(format!("{tool} project ({file}): Graphyne leaves its environment to {tool}.")));
             }
         }
         panel = panel.child(div().mx(px(6.)).my(px(4.)).h(px(1.)).bg(color(c::BORDER))).child(
@@ -1245,25 +1317,88 @@ impl Workspace {
     }
 
     fn install_requirements(&mut self, cx: &mut Context<Self>) {
-        let how = match self.ask_requirements.take() {
-            Some((_, _, _, true)) => "Python: uv sync…".to_string(),
-            Some((_, _, file, _)) => format!("Python: installing the packages from {}…", file.name()),
-            None => "Python: installing packages…".to_string(),
-        };
-        self.pip_status = Some(how.into());
+        self.ask_requirements = None;
+        self.pip_offer = None;
+        self.pip_status = Some(step_text(graphyne_core::python_env::Step::InstallingPackages).into());
         cx.notify();
         let root = self.root.clone();
+        let (tx, rx) = flume::unbounded::<graphyne_core::python_env::Step>();
+        self.show_steps(rx, cx);
         cx.spawn(async move |this, cx| {
-            let result = cx.background_spawn(async move { graphyne_core::python_env::install_requirements(&root) }).await;
+            let result = cx.background_spawn(async move { graphyne_core::python_env::install_requirements(&root, |s| drop(tx.send(s))) }).await;
             this.update(cx, |this, cx| {
                 this.pip_status = None;
                 match result {
-                    Ok(file) => {
-                        this.notify_user(format!("Python: installed the packages from {} into .venv.", file.name()), false, cx);
+                    Ok((file, used)) => {
+                        this.notify_user(format!("Python: installed the packages from {} into .venv with {}.", file.name(), used.name()), false, cx);
                         if let Some(client) = this.lsp_store.read(cx).client_for(LanguageId::Python) {
                             client.notify("workspace/didChangeConfiguration", serde_json::json!({ "settings": {} }));
                         }
                     }
+                    Err((e, used)) => {
+                        this.notify_user(format!("Python: {e}"), true, cx);
+                        if used == graphyne_core::python_env::Installer::Uv {
+                            // pip can install some things uv can't: offer it for this project.
+                            this.pip_offer = Some(e.into());
+                        } else {
+                            this.show_notifications = true;
+                            this.unread = false;
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Steps of a background Python job in the status bar (the download of uv, mostly).
+    fn show_steps(&mut self, rx: flume::Receiver<graphyne_core::python_env::Step>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            while let Ok(step) = rx.recv_async().await {
+                let alive = this.update(cx, |this, cx| {
+                    if this.pip_status.is_some() {
+                        this.pip_status = Some(step_text(step).into());
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// uv / pip / automatic for this project's packages (status-bar menu).
+    fn choose_installer(&mut self, choice: Option<graphyne_core::python_env::Installer>, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        graphyne_core::python_env::set_installer_choice(&self.root, choice);
+        self.save_state(window, cx);
+        let used = graphyne_core::python_env::installer(&self.root);
+        let how = if choice.is_some() { "" } else { " (automatic)" };
+        self.notify_user(format!("Python: this project's packages are installed with {}{how}.", used.name()), false, cx);
+        cx.notify();
+    }
+
+    /// "Install Python 3.x" (status-bar menu): uv downloads that version into its own folder.
+    fn install_python(&mut self, version: &'static str, cx: &mut Context<Self>) {
+        self.menu = None;
+        if self.pip_status.is_some() || matches!(self.py_env, PyEnv::Working(_)) {
+            self.notify_user("Python: wait for the current step to finish.", false, cx);
+            return;
+        }
+        self.pip_status = Some(format!("Python: installing Python {version} with uv…").into());
+        cx.notify();
+        let (tx, rx) = flume::unbounded::<graphyne_core::python_env::Step>();
+        self.show_steps(rx, cx);
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move { graphyne_core::python_env::install_python(version, &|s| drop(tx.send(s))) }).await;
+            this.update(cx, |this, cx| {
+                this.pip_status = None;
+                match result {
+                    Ok(()) => this.notify_user(format!("Python {version} is installed. Pick it in the status bar, or create .venv with it."), false, cx),
                     Err(e) => {
                         this.notify_user(format!("Python: {e}"), true, cx);
                         this.show_notifications = true;
@@ -1275,6 +1410,70 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// uv failed to install the project's packages: offer pip for this project.
+    fn render_pip_offer(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let error = self.pip_offer.clone()?;
+        let short: SharedString = if error.chars().count() > 320 { format!("{}…", error.chars().take(320).collect::<String>()).into() } else { error };
+        let button = |id: &'static str, label: &'static str, primary: bool| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .h(px(28.))
+                .px(px(12.))
+                .rounded(px(6.))
+                .border_1()
+                .cursor_pointer()
+                .text_size(px(theme::UI_SMALL))
+                .when(primary, |d| d.bg(color(c::ACCENT)).border_color(color(c::ACCENT)).text_color(color(0xFFFFFF)).hover(|s| s.bg(color_a(c::ACCENT, 0.85))))
+                .when(!primary, |d| d.border_color(color(c::POPUP_BORDER)).text_color(color(c::TEXT)).hover(|s| s.bg(color(c::HOVER))))
+                .child(label)
+        };
+        Some(
+            div()
+                .id("pip-offer")
+                .occlude()
+                .absolute()
+                .right(px(16.))
+                .bottom(px(theme::STATUS_BAR_HEIGHT + 10.))
+                .w(px(420.))
+                .p(px(14.))
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .rounded(px(10.))
+                .bg(color(c::POPUP))
+                .border_1()
+                .border_color(color(c::POPUP_BORDER))
+                .shadow_lg()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(icon(Icon::Warning, 14., color(c::YELLOW)))
+                        .child(div().text_color(color(c::TEXT)).font_weight(gpui::FontWeight::MEDIUM).child("uv couldn't install the packages")),
+                )
+                .child(div().text_color(color(c::TEXT_MUTED)).text_size(px(theme::UI_SMALL)).child(short))
+                .child(div().text_color(color(c::TEXT_MUTED)).child("pip installs some packages uv can't (old build setups, package sources only pip is set up for). Use pip for this project?"))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.))
+                        .child(button("pip-offer-use", "Use pip for this project", true).on_click(cx.listener(|this, _, window, cx| {
+                            this.pip_offer = None;
+                            graphyne_core::python_env::set_installer_choice(&this.root, Some(graphyne_core::python_env::Installer::Pip));
+                            this.save_state(window, cx);
+                            this.install_requirements(cx);
+                        })))
+                        .child(button("pip-offer-dismiss", "Dismiss", false).on_click(cx.listener(|this, _, _, cx| {
+                            this.pip_offer = None;
+                            cx.notify();
+                        }))),
+                ),
+        )
     }
 
     /// The question about the project's packages (bottom right, until answered).
@@ -2568,6 +2767,8 @@ impl Workspace {
         if self.menu == Some(Menu::Python) {
             self.interpreters = None;
             self.venv_confirm = None;
+            self.auto_installer = graphyne_core::python_env::auto_installer();
+            self.uv_here = graphyne_core::python_env::find_uv().is_some();
             let root = self.root.clone();
             cx.spawn(async move |this, cx| {
                 let found = cx.background_spawn(async move { graphyne_core::python_env::discover(&root) }).await;
@@ -2920,6 +3121,7 @@ impl Render for Workspace {
         let status = self.render_status_bar(cx);
         let notifications = self.render_notifications(cx);
         let requirements_ask = self.render_requirements_ask(cx);
+        let pip_offer = self.render_pip_offer(cx);
         let menu = self.render_menu(cx);
 
         let center = div()
@@ -3010,6 +3212,7 @@ impl Render for Workspace {
             .child(status)
             .children(search_overlay)
             .children(requirements_ask)
+            .children(pip_offer)
             .children(notifications)
             .children(menu)
             .children(self.render_python_menu(cx))
@@ -3032,6 +3235,9 @@ fn step_text(step: graphyne_core::python_env::Step) -> &'static str {
         graphyne_core::python_env::Step::RemovingVenv => "Python: moving the old .venv to the Recycle Bin…",
         graphyne_core::python_env::Step::CreatingVenv => "Python: creating .venv…",
         graphyne_core::python_env::Step::InstallingDebugpy => "Python: installing debugpy…",
+        graphyne_core::python_env::Step::DownloadingUv => "Python: downloading uv (about 15 MB, once)…",
+        graphyne_core::python_env::Step::InstallingPackages => "Python: installing the project's packages…",
+        graphyne_core::python_env::Step::InstallingPython => "Python: installing Python with uv…",
     }
 }
 

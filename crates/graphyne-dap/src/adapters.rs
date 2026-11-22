@@ -58,20 +58,7 @@ const JS_DEBUG_SHA256: &str = "c72fab31bcbfdce6ad1f42adfd28eff8d4681dd3b03b5e2e6
 
 /// A Windows system tool by full path: `tar` and `curl` from Git or MSYS on PATH take
 /// `C:\…` for a remote host.
-fn system_tool(name: &str) -> PathBuf {
-    if cfg!(windows) {
-        let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-        root.join("System32").join(format!("{name}.exe"))
-    } else {
-        PathBuf::from(name)
-    }
-}
-
-fn sha256_hex(path: &Path) -> Result<String, String> {
-    use sha2::{Digest, Sha256};
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    Ok(format!("{:x}", Sha256::digest(&bytes)))
-}
+use graphyne_core::download::{sha256_hex, system_tool};
 
 /// `dapDebugServer.js` of js-debug: `GRAPHYNE_JS_DEBUG_PATH` (the unpacked `js-debug` folder or
 /// the script itself), else Graphyne's copy, downloaded and checked on first use.

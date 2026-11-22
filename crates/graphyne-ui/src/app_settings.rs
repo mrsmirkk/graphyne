@@ -62,4 +62,5 @@ fn apply(s: &Settings) {
     theme::apply_setting("editor.autosave_delay_ms", &SettingValue::Number(s.autosave_delay_ms as f64));
     theme::set_flags(s.usage_hints, s.inlay_hints, s.autosave);
     graphyne_terminal::set_preferred_shell(Some(s.shell.clone()));
+    graphyne_core::python_env::set_uv_enabled(s.python_uv);
 }

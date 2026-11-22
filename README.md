@@ -114,25 +114,37 @@ single portable `.exe`.
 ### Python projects
 - When a Python file appears in a project (or on the first Run / Debug), Graphyne creates `.venv`
   and installs `debugpy`. Run, Debug, the language server **and the built-in terminals** all use
-  that interpreter, so `pip install` in a terminal installs into the same environment Run uses.
+  that interpreter, so `pip install` in a terminal installs into the same environment Run uses
+  (terminal tabs opened before `.venv` existed and not used yet restart with it).
+- **uv by default**: environments are created and packages installed with
+  [uv](https://docs.astral.sh/uv/) — many times faster than pip. If uv isn't installed, Graphyne
+  downloads its own copy the first time (about 15 MB, checked against a pinned SHA-256); without
+  it, pip does the job. The project stays a normal `.venv` (with pip in it), so pip users can open
+  it as usual. Graphyne picks pip instead when pip is set up with its own package source
+  (`pip.ini`, `PIP_INDEX_URL`), which uv doesn't read, and offers **Use pip for this project** when
+  uv fails to install something. Settings → Run & Debug turns uv off.
 - **Interpreter picker** in the status bar (or *Python: Select Interpreter…* in Search Everywhere):
   - the project's virtual environments, every Python the `py` launcher knows, conda environments
     and `python` on PATH, with their versions;
   - **Create / Recreate `.venv` with Python 3.x**, for libraries that don't support the newest
     Python yet (the old `.venv` goes to the Recycle Bin);
-  - *Choose python.exe…* for an interpreter elsewhere (Poetry, pyenv, a shared virtualenv).
+  - *Choose python.exe…* for an interpreter elsewhere (Poetry, pyenv, a shared virtualenv);
+  - **Install Python 3.x** with uv (into uv's own folder) when a library needs an older Python;
+  - **Package manager**: automatic (with the reason for its pick), uv or pip.
 
-  The choice is remembered per project.
+  The choices are remembered per project.
 - **Install missing packages**: on an import Pyright can't resolve, `Alt+Enter` offers
-  *Install package "…"*, which runs pip for the project's interpreter in a terminal tab (common
+  *Install package "…"*, which runs uv or pip for the project's interpreter in a terminal tab (common
   name differences are known: `cv2` → `opencv-python`, `PIL` → `pillow`, `yaml` → `pyyaml`, …).
   After pip finishes, the import is checked again by itself.
 - The project's packages — `requirements.txt`, or else the `dependencies` of `pyproject.toml`
   (with its `dev` dependency group, as uv does) — are installed into `.venv` after Graphyne
   **asks** (Install / Not now / Don't ask again); it asks again when the list changes, not when
   only the version number does. Projects with `uv.lock` are installed with `uv sync` when uv is
-  installed (exactly the locked versions; packages Graphyne added, such as debugpy, are kept),
-  others with pip. Poetry (`poetry.lock`), Pipenv and conda projects are left to their own tools.
+  (exactly the locked versions; packages Graphyne added, such as debugpy, are kept), others with
+  the project's package manager. A package that has to be compiled without a C++ compiler gets a
+  hint: install Build Tools, or use an older Python the package has ready-made builds for.
+  Poetry (`poetry.lock`), Pipenv and conda projects are left to their own tools.
 
 ### Terminal
 - Built-in terminal with tabs, scrollback, selection, clickable `file:line` links, and a

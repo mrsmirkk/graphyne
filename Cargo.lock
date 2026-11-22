@@ -2735,6 +2735,7 @@ dependencies = [
  "ropey",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "toml 0.8.23",
  "trash",
  "unicode-segmentation",
@@ -2751,7 +2752,6 @@ dependencies = [
  "log",
  "parking_lot",
  "serde_json",
- "sha2 0.10.9",
  "windows-sys 0.59.0",
 ]
 

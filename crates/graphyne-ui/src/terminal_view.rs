@@ -47,6 +47,8 @@ pub struct TerminalView {
     pub error: Option<String>,
     cwd: PathBuf,
     pending_input: Vec<u8>,
+    /// The user typed or pasted something here (the tab is in use: never restarted for them).
+    pub typed: bool,
     layout: Option<TermLayout>,
     last_snapshot: Option<Arc<TerminalSnapshot>>,
     selecting: bool,
@@ -111,6 +113,7 @@ impl TerminalView {
             error: None,
             cwd,
             pending_input: Vec::new(),
+            typed: false,
             layout: None,
             last_snapshot: None,
             selecting: false,
@@ -159,6 +162,7 @@ impl TerminalView {
             }
             if k.key == "v" {
                 if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
+                    self.typed = true;
                     state.paste(&text);
                 }
                 cx.stop_propagation();
@@ -180,6 +184,7 @@ impl TerminalView {
             shift: k.modifiers.shift,
         };
         if let Some(bytes) = key_to_bytes(input, state.app_cursor()) {
+            self.typed = true;
             state.input(&bytes);
             cx.stop_propagation();
             cx.notify();
@@ -230,6 +235,7 @@ impl TerminalView {
             }
             None => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
+                    self.typed = true;
                     state.paste(&text);
                 }
             }
@@ -255,6 +261,7 @@ impl TerminalView {
     }
     fn paste(&mut self, _: &term_actions::Paste, _: &mut Window, cx: &mut Context<Self>) {
         if let (Some(state), Some(text)) = (self.state.clone(), cx.read_from_clipboard().and_then(|i| i.text())) {
+            self.typed = true;
             state.paste(&text);
         }
     }
@@ -464,6 +471,7 @@ impl EntityInputHandler for TerminalView {
         if text.is_empty() {
             return;
         }
+        self.typed = true;
         self.send_text(text);
         cx.notify();
     }
@@ -587,7 +595,16 @@ impl TerminalPanel {
         env: Vec<(String, String)>,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalView> {
-        // `python` / `pip` in the project's terminals are the project's interpreter.
+        let (view, sub) = self.make_view(cwd, command, env, cx);
+        self.tabs.push(TermTab { title, view: view.clone(), is_run, _sub: sub });
+        self.active = self.tabs.len() - 1;
+        cx.notify();
+        view
+    }
+
+    /// A terminal with the project's environment (`python` / `pip` are the project's
+    /// interpreter), and the subscription that follows it.
+    fn make_view(&mut self, cwd: PathBuf, command: Option<(String, Vec<String>)>, env: Vec<(String, String)>, cx: &mut Context<Self>) -> (Entity<TerminalView>, Subscription) {
         let (mut vars, path_prepend) = graphyne_core::python_env::terminal_env(&self.root);
         vars.extend(env);
         let view = cx.new(|cx| TerminalView::new(cwd, command, vars, path_prepend, cx));
@@ -602,10 +619,35 @@ impl TerminalPanel {
                 cx.notify();
             }
         });
-        self.tabs.push(TermTab { title, view: view.clone(), is_run, _sub: sub });
-        self.active = self.tabs.len() - 1;
+        (view, sub)
+    }
+
+    /// The project's Python environment appeared or changed: shell tabs nobody has typed in
+    /// yet start again with it (the first one opens with the project, before `.venv` exists).
+    /// Returns how many shell tabs were left alone because they are in use.
+    pub fn refresh_untouched(&mut self, cx: &mut Context<Self>) -> usize {
+        let mut kept = 0;
+        for ix in 0..self.tabs.len() {
+            if self.tabs[ix].is_run {
+                continue;
+            }
+            let (typed, cwd) = {
+                let v = self.tabs[ix].view.read(cx);
+                (v.typed, v.cwd.clone())
+            };
+            if typed {
+                kept += 1;
+                continue;
+            }
+            let (view, sub) = self.make_view(cwd, None, Vec::new(), cx);
+            let old = std::mem::replace(&mut self.tabs[ix].view, view);
+            self.tabs[ix]._sub = sub;
+            if let Some(state) = &old.read(cx).state {
+                state.kill();
+            }
+        }
         cx.notify();
-        view
+        kept
     }
 
     pub fn new_terminal(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {

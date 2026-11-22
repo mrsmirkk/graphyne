@@ -102,6 +102,8 @@ pub struct ProjectState {
     pub db_expanded: Vec<String>,
     /// Python interpreter picked in the status bar (None: the project's `.venv`).
     pub python: Option<PathBuf>,
+    /// "uv" / "pip" picked in the status bar for installing packages (None: automatic).
+    pub python_installer: Option<String>,
 }
 
 impl Default for ProjectState {
@@ -122,6 +124,7 @@ impl Default for ProjectState {
             expanded: Vec::new(),
             db_expanded: Vec::new(),
             python: None,
+            python_installer: None,
         }
     }
 }
