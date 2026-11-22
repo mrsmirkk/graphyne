@@ -109,7 +109,14 @@ single portable `.exe`.
   Graphyne downloads `js-debug` (about 1 MB, checked against a pinned SHA-256) on the first
   debug session; `.ts` files run as is on Node 23.6 or newer. Node's own frames are hidden from the
   call stack.
-- Rust, C and C++ via `lldb-dap` / CodeLLDB / `gdb`, Go via `dlv` — wired up, not yet verified.
+- **Rust** via [CodeLLDB](https://github.com/vadimcn/codelldb) — tested with Rust 1.99 (MSVC):
+  the crate is built with `cargo build` first, then breakpoints, stepping into functions,
+  inline values, Rust-aware variables (String, Vec, HashMap, structs) and the evaluation console
+  (`p.x + p.y`; LLDB doesn't call methods). Graphyne downloads CodeLLDB (about 50 MB, checked
+  against a pinned SHA-256) on the first Rust debug session unless `lldb-dap` or `codelldb` is on
+  PATH. Frames of std / core and the program's start-up are hidden from the call stack.
+- C and C++ (`gcc` / `g++`, then `gdb` ≥ 14 or the same LLDB) and Go via `dlv` — wired up, not
+  yet verified.
 
 ### Python projects
 - When a Python file appears in a project (or on the first Run / Debug), Graphyne creates `.venv`
@@ -236,8 +243,8 @@ Planned, roughly in this order:
 
 - [ ] **Databases, next steps** — SSH tunnels (connections, the schema browser, the SQL console,
       editing tables and query results, export and CSV import are done).
-- [ ] **Debugging beyond Python and JavaScript** verified end to end: Rust / C / C++ (`lldb-dap`),
-      Go (`delve`).
+- [ ] **Debugging C / C++ and Go** verified end to end (Rust, Python and JavaScript / TypeScript
+      are).
 - [ ] **macOS and Linux** builds (GPUI supports both; Graphyne isn't tested there yet).
 - [ ] **Faster start-up** — most of today's ~0.4 s goes to Direct3D initialization.
 - [ ] An extension gallery (install from a URL).

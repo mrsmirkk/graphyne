@@ -45,8 +45,22 @@ pub fn parse_threads(body: &Value) -> Vec<Thread> {
 
 /// The frames of a `stackTrace` response. Frames the adapter marks as not the user's (js-debug:
 /// Node internals and `skipFiles`) are left out, except the top one.
+/// A frame of code the user can't open or doesn't care about: what the adapter marks so (Node
+/// internals), frames without source, Rust's std / core / alloc and the program's start-up.
+fn library_frame(f: &Value) -> bool {
+    if f["source"]["presentationHint"] == "deemphasize" || f["presentationHint"] == "subtle" {
+        return true;
+    }
+    if f["source"]["path"].as_str().is_none() && f["source"]["sourceReference"].as_i64().unwrap_or(0) == 0 {
+        return true;
+    }
+    let name = f["name"].as_str().unwrap_or("").trim_start_matches('<');
+    const LIBRARY: [&str; 11] = ["std::", "core::", "alloc::", "fn(", "panic_unwind::", "__rust", "invoke_main", "__scrt_common_main", "mainCRTStartup", "BaseThreadInitThunk", "RtlUserThreadStart"];
+    LIBRARY.iter().any(|p| name.starts_with(p))
+}
+
 pub fn parse_stack(body: &Value) -> Vec<StackFrame> {
-    let hidden = |f: &Value| f["source"]["presentationHint"] == "deemphasize" || f["presentationHint"] == "subtle";
+    let hidden = library_frame;
     body["stackFrames"]
         .as_array()
         .map(|a| {
@@ -150,6 +164,24 @@ mod tests {
         assert_eq!(ids(parse_stack(&json!({ "stackFrames": [user.clone(), internal(3), internal(4)] }))), [2]);
         // Paused inside Node itself: the top frame stays.
         assert_eq!(ids(parse_stack(&json!({ "stackFrames": [internal(1), user, internal(3)] }))), [1, 2]);
+    }
+
+    #[test]
+    fn hides_rust_std_and_start_up_frames() {
+        let frame = |id: i64, name: &str, path: Option<&str>| match path {
+            Some(p) => json!({ "id": id, "name": name, "line": 1, "source": { "path": p } }),
+            None => json!({ "id": id, "name": name, "line": 1 }),
+        };
+        let ids = |frames: Vec<StackFrame>| frames.into_iter().map(|f| f.id).collect::<Vec<_>>();
+        let stack = json!({ "stackFrames": [
+            frame(1, "rust_demo::fib", Some("C:/p/src/main.rs")),
+            frame(2, "rust_demo::main", Some("C:/p/src/main.rs")),
+            frame(3, "<fn() as core::ops::function::FnOnce<()>>::call_once", Some("/rustc/abc/library/core/src/ops/function.rs")),
+            frame(4, "std::rt::lang_start::<()>::{closure#0}", Some("/rustc/abc/library/std/src/rt.rs")),
+            frame(5, "invoke_main", None),
+            frame(6, "BaseThreadInitThunk", None),
+        ] });
+        assert_eq!(ids(parse_stack(&stack)), [1, 2]);
     }
 
     #[test]

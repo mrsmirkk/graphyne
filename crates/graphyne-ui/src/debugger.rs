@@ -348,10 +348,25 @@ impl Debugger {
         cx.emit(DebuggerEvent::Started);
         cx.notify();
         let root = self.root.clone();
+        // Slow steps of resolving (cargo build, downloading an adapter) in the panel's status.
+        let (tx, rx) = flume::unbounded::<String>();
+        let progress = cx.spawn(async move |this, cx| {
+            while let Ok(text) = rx.recv_async().await {
+                let alive = this.update(cx, |d, cx| {
+                    if let Some(s) = d.session.as_mut().filter(|s| matches!(s.status, Status::Starting(_))) {
+                        s.status = Status::Starting(text);
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        });
         let task = cx.spawn(async move |this, cx| {
             let started = cx
                 .background_spawn(async move {
-                    let r = adapters::resolve(&file, &root)?;
+                    let r = adapters::resolve_with_progress(&file, &root, &|text| drop(tx.send(text.to_string())))?;
                     let client = DapClient::spawn(r.name, &r.program, &r.args, &r.env, &r.cwd, r.transport.clone()).map_err(|e| format!("{e:#}"))?;
                     client.clone().initialize(r.adapter_id).await.map_err(|e| format!("initialize: {e:#}"))?;
                     Ok::<_, String>((client, r))
@@ -392,6 +407,7 @@ impl Debugger {
             }
         });
         if let Some(s) = self.session.as_mut() {
+            s._tasks.push(progress);
             s._tasks.push(task);
         }
     }

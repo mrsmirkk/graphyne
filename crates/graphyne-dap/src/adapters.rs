@@ -39,17 +39,53 @@ fn free_port() -> Option<u16> {
 
 /// Resolve the adapter and launch configuration for debugging `file`.
 pub fn resolve(file: &Path, root: &Path) -> Result<Resolved, String> {
+    resolve_with_progress(file, root, &|_| {})
+}
+
+/// [`resolve`], telling `progress` about the slow steps (building, downloading an adapter).
+pub fn resolve_with_progress(file: &Path, root: &Path, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
     let lang = LanguageId::from_path(file);
     let dir = file.parent().unwrap_or(root).to_path_buf();
     let title = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     match lang {
         LanguageId::Python => python(file, &dir, &title, root),
-        LanguageId::Rust => rust(file, root, &title),
-        LanguageId::C | LanguageId::Cpp => native(file, &dir, &title, lang),
+        LanguageId::Rust => rust(file, root, &title, progress),
+        LanguageId::C | LanguageId::Cpp => native(file, &dir, &title, lang, progress),
         LanguageId::Go => go(file, &dir, &title),
         LanguageId::JavaScript | LanguageId::TypeScript => node(file, &dir, &title),
         other => Err(format!("No debugger configured for {} yet", other.name())),
     }
+}
+
+/// The CodeLLDB release Graphyne downloads on first use (Vadim Chugunov, MIT: LLDB with Rust
+/// support and a DAP adapter, from its VS Code package), and its SHA-256 (as GitHub lists it).
+const CODELLDB_VERSION: &str = "1.12.3";
+const CODELLDB_SHA256: &str = "a916e509308dac817732f63ca604a8b93ed29cd16f38a2fa9f0b64ed58e8f51a";
+
+/// `codelldb.exe`: `GRAPHYNE_CODELLDB_PATH` (the unpacked `extension` folder or the exe itself),
+/// else Graphyne's copy, downloaded (about 50 MB) and checked on first use.
+fn codelldb(progress: &dyn Fn(&str)) -> Result<PathBuf, String> {
+    let exe_in = |ext: &Path| ext.join("adapter").join(if cfg!(windows) { "codelldb.exe" } else { "codelldb" });
+    if let Some(p) = std::env::var_os("GRAPHYNE_CODELLDB_PATH").filter(|p| !p.is_empty()).map(PathBuf::from) {
+        let exe = if p.is_dir() { exe_in(&p) } else { p };
+        return if exe.is_file() { Ok(exe) } else { Err(format!("GRAPHYNE_CODELLDB_PATH: {} not found", exe.display())) };
+    }
+    let dir = graphyne_core::session::state_dir().ok_or("no folder for Graphyne's state")?.join("adapters").join(format!("codelldb-{CODELLDB_VERSION}"));
+    let exe = exe_in(&dir.join("extension"));
+    if exe.is_file() {
+        return Ok(exe);
+    }
+    if !(cfg!(windows) && cfg!(target_arch = "x86_64")) {
+        return Err("No LLDB debug adapter found: install lldb-dap (LLVM) or CodeLLDB".into());
+    }
+    progress(&format!("Downloading the Rust debugger (CodeLLDB {CODELLDB_VERSION}, about 50 MB, once)…"));
+    let url = format!("https://github.com/vadimcn/codelldb/releases/download/v{CODELLDB_VERSION}/codelldb-win32-x64.vsix");
+    let staging = graphyne_core::download::fetch_unpacked(&url, CODELLDB_SHA256, &dir)
+        .map_err(|e| format!("Could not download the Rust debugger (CodeLLDB {CODELLDB_VERSION}) from {url}: {e}. Check the connection, or install lldb-dap (LLVM)"))?;
+    let moved = std::fs::rename(staging.join("extension"), dir.join("extension"));
+    let _ = std::fs::remove_dir_all(&staging);
+    moved.map_err(|e| format!("installing CodeLLDB: {e}"))?;
+    if exe.is_file() { Ok(exe) } else { Err("the CodeLLDB package has no adapter/codelldb.exe".into()) }
 }
 
 /// The js-debug release Graphyne downloads on first use (Microsoft, MIT), and its SHA-256.
@@ -183,13 +219,20 @@ fn python(file: &Path, dir: &Path, title: &str, root: &Path) -> Result<Resolved,
 }
 
 /// lldb-dap (stdio) or CodeLLDB (TCP).
-fn lldb_adapter() -> Option<(&'static str, PathBuf, Vec<String>, Transport)> {
+/// lldb-dap (LLVM) or CodeLLDB on PATH, else Graphyne's CodeLLDB (downloaded on first use).
+fn lldb_adapter(progress: &dyn Fn(&str)) -> Result<(&'static str, PathBuf, Vec<String>, Transport), String> {
     if let Some(p) = which("lldb-dap").or_else(|| which("lldb-vscode")) {
-        return Some(("lldb-dap", p, Vec::new(), Transport::Stdio));
+        return Ok(("lldb-dap", p, Vec::new(), Transport::Stdio));
     }
-    let p = which("codelldb")?;
-    let port = free_port()?;
-    Some(("codelldb", p, vec!["--port".into(), port.to_string()], Transport::Tcp { port }))
+    let p = match which("codelldb") {
+        Some(p) => p,
+        None => codelldb(progress)?,
+    };
+    let port = free_port().ok_or("no free TCP port")?;
+    // No disassembly view: stepping into code without sources (std on MSVC) steps over it.
+    // The console evaluates expressions (`p.x + p.y`), not LLDB commands.
+    let settings = json!({ "showDisassembly": "never", "consoleMode": "evaluate" }).to_string();
+    Ok(("codelldb", p, vec!["--port".into(), port.to_string(), "--settings".into(), settings], Transport::Tcp { port }))
 }
 
 /// `cargo build --message-format=json` and pick the produced binary.
@@ -216,23 +259,30 @@ fn cargo_build(crate_dir: &Path) -> Result<PathBuf, String> {
     exe.ok_or_else(|| "cargo build produced no executable (library crate?)".to_string())
 }
 
-fn rust(file: &Path, root: &Path, title: &str) -> Result<Resolved, String> {
-    let (name, program, args, transport) = lldb_adapter().ok_or("No LLDB debug adapter found (install LLVM for lldb-dap, or CodeLLDB)")?;
+fn rust(file: &Path, root: &Path, title: &str, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
     let crate_dir = graphyne_core::run::find_up(file, root, "Cargo.toml").ok_or("Cargo.toml not found for this file")?;
+    progress("Building with cargo…");
     let exe = cargo_build(&crate_dir)?;
-    Ok(Resolved {
-        name,
-        adapter_id: "lldb",
-        program,
-        args,
-        env: Vec::new(),
-        transport,
-        cwd: crate_dir.clone(),
-        launch: json!({ "type": "lldb", "request": "launch", "name": format!("Graphyne: {title}"), "program": exe, "args": [], "cwd": crate_dir, "stopOnEntry": false }),
-    })
+    let (name, program, args, transport) = lldb_adapter(progress)?;
+    let launch = lldb_launch(name, title, &exe, &crate_dir, "rust");
+    Ok(Resolved { name, adapter_id: "lldb", program, args, env: Vec::new(), transport, cwd: crate_dir.clone(), launch })
 }
 
-fn native(file: &Path, dir: &Path, title: &str, lang: LanguageId) -> Result<Resolved, String> {
+/// LLDB's launch request. The program runs in a terminal tab (it can read input): CodeLLDB's
+/// "terminal", lldb-dap's "runInTerminal". `sourceLanguages` turns on CodeLLDB's formatting
+/// of the language's types (Rust: String, Vec, Option…).
+fn lldb_launch(adapter: &str, title: &str, exe: &Path, cwd: &Path, language: &str) -> Value {
+    if adapter == "codelldb" {
+        json!({
+            "type": "lldb", "request": "launch", "name": format!("Graphyne: {title}"), "program": exe, "args": [], "cwd": cwd,
+            "stopOnEntry": false, "terminal": "integrated", "sourceLanguages": [language]
+        })
+    } else {
+        json!({ "type": "lldb-dap", "request": "launch", "name": format!("Graphyne: {title}"), "program": exe, "args": [], "cwd": cwd, "stopOnEntry": false, "runInTerminal": true })
+    }
+}
+
+fn native(file: &Path, dir: &Path, title: &str, lang: LanguageId, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
     let exe = std::env::temp_dir().join(if cfg!(windows) { "graphyne-debug.exe" } else { "graphyne-debug" });
     let compiler = if lang == LanguageId::Cpp { "g++" } else { "gcc" };
     let out = hidden_command(compiler)
@@ -259,17 +309,9 @@ fn native(file: &Path, dir: &Path, title: &str, lang: LanguageId) -> Result<Reso
             launch: json!({ "request": "launch", "name": format!("Graphyne: {title}"), "program": exe, "cwd": dir, "stopAtBeginningOfMainSubprogram": false }),
         });
     }
-    let (name, program, args, transport) = lldb_adapter().ok_or("No native debugger found (gdb ≥ 14 or lldb-dap)")?;
-    Ok(Resolved {
-        name,
-        adapter_id: "lldb",
-        program,
-        args,
-        env: Vec::new(),
-        transport,
-        cwd: dir.to_path_buf(),
-        launch: json!({ "type": "lldb", "request": "launch", "name": format!("Graphyne: {title}"), "program": exe, "cwd": dir, "stopOnEntry": false }),
-    })
+    let (name, program, args, transport) = lldb_adapter(progress)?;
+    let launch = lldb_launch(name, title, &exe, dir, if lang == LanguageId::Cpp { "cpp" } else { "c" });
+    Ok(Resolved { name, adapter_id: "lldb", program, args, env: Vec::new(), transport, cwd: dir.to_path_buf(), launch })
 }
 
 fn go(file: &Path, dir: &Path, title: &str) -> Result<Resolved, String> {
