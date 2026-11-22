@@ -161,6 +161,10 @@ single portable `.exe`.
   type into a cell, set NULL, add and delete rows. Changes are highlighted until **Submit** saves
   them all in one transaction (nothing is saved if a row was changed elsewhere meanwhile) or
   **Revert** drops them.
+- **Edit query results** the same way: the result of a plain `SELECT` from one table
+  (`SELECT id, name FROM users WHERE age > 20`) is editable when it includes the primary key;
+  after Submit the query runs again. Other results — joins, `GROUP BY`, computed columns or
+  aliases, views — stay read-only and the result bar says why.
 - **Export** results and tables to **CSV, JSON or SQL INSERT** statements; copy a cell or a row.
 - **Import CSV** (comma, semicolon or tab separated; UTF-8, UTF-16 or Windows-1251 from a Russian
   Excel, detected automatically): right-click a connection to create a new
@@ -209,8 +213,8 @@ single portable `.exe`.
 
 Planned, roughly in this order:
 
-- [ ] **Databases, next steps** — SSH tunnels, editing query results (not only table tabs)
-      (connections, the schema browser, the SQL console, editing, export and CSV import are done).
+- [ ] **Databases, next steps** — SSH tunnels (connections, the schema browser, the SQL console,
+      editing tables and query results, export and CSV import are done).
 - [ ] **Debugging beyond Python and JavaScript** verified end to end: Rust / C / C++ (`lldb-dap`),
       Go (`delve`).
 - [ ] **Python**: dependencies from `pyproject.toml` (uv, Poetry, PDM).

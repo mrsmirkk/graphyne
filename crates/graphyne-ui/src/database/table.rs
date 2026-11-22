@@ -11,8 +11,7 @@ use gpui::prelude::*;
 use gpui::{
     App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Subscription, Window, anchored, deferred, div, px,
 };
-use graphyne_db::{CellEdit, ExportFormat, ROW_LIMIT, Value};
-use std::collections::BTreeMap;
+use graphyne_db::{ExportFormat, ROW_LIMIT};
 use std::time::Instant;
 
 pub enum DbTableEvent {
@@ -192,31 +191,15 @@ impl DbTableView {
         if edits.is_empty() || self.saving {
             return;
         }
-        let key_at: Vec<usize> = keys.iter().filter_map(|k| columns.iter().position(|c| c == k)).collect();
-        if key_at.len() != keys.len() {
-            self.save_error = Some(("Nothing was saved: the primary key's columns are not in the loaded rows.".into(), None));
-            cx.notify();
-            return;
-        }
         let table = kind.quote_table(self.schema.as_deref(), &self.table);
-        let key_of = |r: usize| -> Vec<(&str, &Value)> { key_at.iter().map(|&i| (columns[i].as_str(), &rows[r][i])).collect() };
-        let mut statements = Vec::new();
-        for &r in &edits.deleted {
-            statements.push(kind.delete_sql(&table, &key_of(r)));
-        }
-        let mut by_row: BTreeMap<usize, Vec<(&str, &CellEdit)>> = BTreeMap::new();
-        for ((r, col), edit) in &edits.cells {
-            if !edits.deleted.contains(r) {
-                by_row.entry(*r).or_default().push((columns[*col].as_str(), edit));
+        let statements = match super::edit_statements(&kind, &table, &keys, &columns, &rows, &edits) {
+            Ok(s) => s,
+            Err(e) => {
+                self.save_error = Some((format!("Nothing was saved: {e}.").into(), None));
+                cx.notify();
+                return;
             }
-        }
-        for (r, set) in &by_row {
-            statements.push(kind.update_sql(&table, set, &key_of(*r)));
-        }
-        for added in &edits.added {
-            let values: Vec<(&str, &CellEdit)> = added.iter().map(|(col, edit)| (columns[*col].as_str(), edit)).collect();
-            statements.push(kind.insert_sql(&table, &values));
-        }
+        };
         let sql: Vec<String> = statements.iter().map(|s| s.sql.clone()).collect();
         let begin = kind.begin_sql();
         let title = self.title();

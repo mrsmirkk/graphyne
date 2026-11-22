@@ -1,5 +1,6 @@
 //! A SQL console tab: an editor for the connection's queries (kept between sessions) above
-//! the results. Ctrl+Enter runs the statement under the cursor, or the selection.
+//! the results. Ctrl+Enter runs the statement under the cursor, or the selection. The result
+//! of a plain `SELECT` from one table with a primary key can be edited like the table itself.
 
 use super::grid::{DataGrid, GridEvent, NoPreview};
 use super::{DbStore, RunStatement, StopQuery, format_elapsed, group_digits};
@@ -9,7 +10,7 @@ use crate::editor::Editor;
 use crate::theme::{self, c, color, color_a};
 use gpui::prelude::*;
 use gpui::{App, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Window, div, px, relative};
-use graphyne_db::ExportFormat;
+use graphyne_db::{DbKind, ExportFormat};
 use graphyne_db::{DbSession, QueryOutcome, ROW_LIMIT, StatementResult};
 use std::sync::Arc;
 
@@ -27,8 +28,19 @@ enum Tone {
 struct ResizeResults;
 
 pub enum ConsoleEvent {
-    /// A message for the notifications (exports).
+    /// A message for the notifications (exports, saved edits).
     Notify(String),
+}
+
+/// Where edits of the shown rows are saved.
+#[derive(Clone)]
+struct ResultTarget {
+    schema: Option<String>,
+    table: String,
+    /// The primary key's columns.
+    keys: Vec<String>,
+    /// The table's name of each column of the result.
+    columns: Vec<String>,
 }
 
 pub struct DbConsole {
@@ -47,6 +59,13 @@ pub struct DbConsole {
     _store_sub: gpui::Subscription,
     _grid_sub: gpui::Subscription,
     export_menu: Option<Point<Pixels>>,
+    /// The statement whose rows are shown (run again after saving edits).
+    rows_sql: Option<String>,
+    /// Where edits of the shown rows go, or why they can't be edited ("" = no rows).
+    target: Result<ResultTarget, String>,
+    saving: bool,
+    /// Why saving failed, and the statement that failed.
+    save_error: Option<(SharedString, Option<SharedString>)>,
 }
 
 impl EventEmitter<ConsoleEvent> for DbConsole {}
@@ -65,11 +84,12 @@ fn changes_schema(sql: &str) -> bool {
 
 impl DbConsole {
     pub fn new(db_id: String, store: Entity<DbStore>, editor: Entity<Editor>, cx: &mut Context<Self>) -> Self {
-        let sub = cx.observe(&store, |_, _, cx| cx.notify());
+        // The schema (primary keys) may arrive after the rows.
+        let sub = cx.observe(&store, |this, _, cx| this.update_target(cx));
         let grid = cx.new(DataGrid::new);
         let grid_sub = cx.subscribe(&grid, |_, _, ev: &GridEvent, cx| match ev {
             GridEvent::Notify(m) => cx.emit(ConsoleEvent::Notify(m.clone())),
-            GridEvent::EditsChanged => {}
+            GridEvent::EditsChanged => cx.notify(),
         });
         Self {
             db_id,
@@ -84,6 +104,10 @@ impl DbConsole {
             _store_sub: sub,
             _grid_sub: grid_sub,
             export_menu: None,
+            rows_sql: None,
+            target: Err(String::new()),
+            saving: false,
+            save_error: None,
         }
     }
 
@@ -119,7 +143,15 @@ impl DbConsole {
             cx.notify();
             return;
         };
+        self.run_sql(sql, window, cx);
+    }
+
+    fn run_sql(&mut self, sql: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
         self.busy = true;
+        self.save_error = None;
         self.failed_sql = None;
         self.status = Some(("Running…".into(), Tone::Info));
         let waiting = self.store.update(cx, |s, cx| s.session(&self.db_id, cx));
@@ -157,7 +189,118 @@ impl DbConsole {
         self.running = None;
         self.status = Some((error.into(), Tone::Error));
         self.failed_sql = sql.map(SharedString::from);
+        self.rows_sql = None;
         self.grid.update(cx, |g, cx| g.clear(cx));
+        self.update_target(cx);
+        cx.notify();
+    }
+
+    /// Where the shown rows can be saved: a plain `SELECT` of columns from one table that has
+    /// a primary key, with the key in the result.
+    fn find_target(&self, cx: &App) -> Result<ResultTarget, String> {
+        let Some(sql) = &self.rows_sql else { return Err(String::new()) };
+        let source = graphyne_db::single_table_select(sql).map_err(str::to_string)?;
+        let store = self.store.read(cx);
+        let entry = store.entry(&self.db_id).ok_or("the connection was removed")?;
+        let schema = entry.schema.as_ref().ok_or("reading the table's structure…")?;
+        // `public.users`, `main.users`, `shop.users` (the connection's database) name a table
+        // of the default schema, listed without one.
+        let default_schema = |s: &str| match &entry.config.kind {
+            DbKind::Sqlite { .. } => s.eq_ignore_ascii_case("main"),
+            DbKind::Postgres(_) => s.eq_ignore_ascii_case("public"),
+            DbKind::Mysql(server) => !server.database.is_empty() && s.eq_ignore_ascii_case(&server.database),
+        };
+        let matches = |t: &&graphyne_db::Table| {
+            t.name.eq_ignore_ascii_case(&source.table)
+                && match (&source.schema, &t.schema) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                    (Some(a), None) => default_schema(a),
+                    (None, Some(_)) => false,
+                }
+        };
+        if schema.views.iter().any(|v| matches(&v)) {
+            return Err("a view: its rows are read-only".into());
+        }
+        let found: Vec<&graphyne_db::Table> = schema.tables.iter().filter(matches).collect();
+        let table = found.iter().find(|t| t.name == source.table).or(found.first()).copied().ok_or_else(|| format!("{} is not in the schema: refresh the connection", source.table))?;
+        let keys: Vec<String> = table.columns.iter().filter(|c| c.primary_key).map(|c| c.name.clone()).collect();
+        if keys.is_empty() {
+            return Err(format!("{} has no primary key", table.name));
+        }
+        let mut columns: Vec<String> = Vec::new();
+        for name in self.grid.read(cx).column_names() {
+            let column = table
+                .columns
+                .iter()
+                .find(|c| c.name == name)
+                .or_else(|| table.columns.iter().find(|c| c.name.eq_ignore_ascii_case(&name)))
+                .ok_or_else(|| format!("\"{name}\" is not a column of {}", table.name))?;
+            if columns.contains(&column.name) {
+                return Err(format!("\"{name}\" is in the result twice"));
+            }
+            columns.push(column.name.clone());
+        }
+        if let Some(missing) = keys.iter().find(|k| !columns.contains(k)) {
+            return Err(format!("the primary key ({missing}) is not in the result"));
+        }
+        Ok(ResultTarget { schema: table.schema.clone(), table: table.name.clone(), keys, columns })
+    }
+
+    fn update_target(&mut self, cx: &mut Context<Self>) {
+        self.target = self.find_target(cx);
+        let editable = self.target.is_ok();
+        self.grid.update(cx, |g, cx| g.set_editable(editable, cx));
+        cx.notify();
+    }
+
+    /// Save the pending edits of the result in one transaction, then run its query again.
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(target) = self.target.clone() else { return };
+        let Some(kind) = self.store.read(cx).entry(&self.db_id).map(|e| e.config.kind.clone()) else { return };
+        let grid = self.grid.read(cx);
+        let (edits, rows) = (grid.edits().clone(), grid.rows());
+        if edits.is_empty() || self.saving || self.busy {
+            return;
+        }
+        let table = kind.quote_table(target.schema.as_deref(), &target.table);
+        let statements = match super::edit_statements(&kind, &table, &target.keys, &target.columns, &rows, &edits) {
+            Ok(s) => s,
+            Err(e) => {
+                self.save_error = Some((format!("Nothing was saved: {e}.").into(), None));
+                cx.notify();
+                return;
+            }
+        };
+        let sql: Vec<String> = statements.iter().map(|s| s.sql.clone()).collect();
+        let begin = kind.begin_sql();
+        let rerun = self.rows_sql.clone();
+        let title = target.table.clone();
+        self.saving = true;
+        self.save_error = None;
+        let waiting = self.store.update(cx, |s, cx| s.session(&self.db_id, cx));
+        cx.spawn_in(window, async move |this, cx| {
+            let result = match waiting.recv_async().await {
+                Ok(Ok(session)) => session.run_transaction(begin, statements).recv_async().await.unwrap_or_else(|_| Err((0, "the connection was closed".into()))),
+                Ok(Err(e)) => Err((usize::MAX, format!("could not connect: {e}"))),
+                Err(_) => Err((usize::MAX, "the connection was closed".into())),
+            };
+            this.update_in(cx, |this, window, cx| {
+                this.saving = false;
+                match result {
+                    Ok(changed) => {
+                        cx.emit(ConsoleEvent::Notify(format!("{title}: saved, {} row{} changed.", group_digits(changed), if changed == 1 { "" } else { "s" })));
+                        if let Some(sql) = rerun {
+                            this.run_sql(sql, window, cx);
+                        }
+                    }
+                    Err((index, e)) => this.save_error = Some((format!("Nothing was saved: {e}").into(), sql.get(index).map(|s| s.clone().into()))),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -173,10 +316,14 @@ impl DbConsole {
         let statements = if count > 1 { format!("{count} statements · ") } else { String::new() };
         let mut affected = 0u64;
         let mut rows = None;
+        let mut rows_sql = None;
         let mut error = None;
         for outcome in outcomes {
             match outcome.result {
-                Ok(StatementResult::Rows(r)) => rows = Some(r),
+                Ok(StatementResult::Rows(r)) => {
+                    rows = Some(r);
+                    rows_sql = Some(outcome.sql);
+                }
                 Ok(StatementResult::Done { affected: n }) => affected += n,
                 Err(e) => error = Some((e, outcome.sql)),
             }
@@ -201,10 +348,14 @@ impl DbConsole {
                     format!("{statements}{} row{} · {elapsed}", group_digits(n), if n == 1 { "" } else { "s" })
                 };
                 self.grid.update(cx, |g, cx| g.set_result(r, cx));
+                self.rows_sql = rows_sql;
+                self.update_target(cx);
                 line
             }
             None => {
+                self.rows_sql = None;
                 self.grid.update(cx, |g, cx| g.clear(cx));
+                self.update_target(cx);
                 if count == 0 { "Nothing to run".to_string() } else { format!("{statements}Done · {} row{} affected · {elapsed}", group_digits(affected), if affected == 1 { "" } else { "s" }) }
             }
         };
@@ -296,6 +447,7 @@ impl Render for DbConsole {
             .child(div().text_color(color(c::TEXT)).font_weight(gpui::FontWeight::MEDIUM).child("Result"))
             .when_some(status.clone().filter(|_| tone != Tone::Error), |d, s| d.child(div().min_w(px(0.)).overflow_hidden().whitespace_nowrap().text_color(status_color).child(s)))
             .child(div().flex_1())
+            .when(has_rows && tone != Tone::Error, |d| d.children(self.render_edit_tools(cx)))
             .when(has_rows && tone != Tone::Error, |d| {
                 d.child(
                     div()
@@ -374,12 +526,137 @@ impl Render for DbConsole {
                     .hover(|s| s.bg(color_a(c::ACCENT, 0.35)))
                     .on_drag(ResizeResults, |_, _, _, cx| cx.new(|_| NoPreview)),
             )
-            .child(div().flex().flex_col().flex_1().min_h(px(0.)).child(results_header).child(div().flex().flex_col().flex_1().min_h(px(0.)).child(body)))
+            .child(div().flex().flex_col().flex_1().min_h(px(0.)).child(results_header).children(self.render_save_error(cx)).child(div().flex().flex_col().flex_1().min_h(px(0.)).child(body)))
             .children(menu)
     }
 }
 
 impl DbConsole {
+    /// Row / Delete / Submit for an editable result, or why it is read-only.
+    fn render_edit_tools(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let tool = |id: &'static str, ic: Icon, label: &'static str| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .h(px(22.))
+                .px(px(7.))
+                .rounded(px(5.))
+                .cursor_pointer()
+                .hover(|s| s.bg(color(c::HOVER)))
+                .text_color(color(c::TEXT))
+                .child(icon(ic, 13., color(c::TEXT_MUTED)))
+                .child(label)
+        };
+        let why = match &self.target {
+            Ok(_) => None,
+            Err(why) if why.is_empty() => return Vec::new(),
+            Err(why) => Some(why.clone()),
+        };
+        if let Some(why) = why {
+            let text: SharedString = format!("read-only — {why}").into();
+            return vec![
+                div()
+                    .id("console-read-only")
+                    .max_w(px(420.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(color(c::TEXT_DIM))
+                    .child(text.clone())
+                    .tooltip(tooltip(format!("{text}. Results of a plain SELECT from one table with a primary key can be edited."), None))
+                    .into_any_element(),
+            ];
+        }
+        let grid = self.grid.read(cx);
+        let pending = grid.edits().row_count();
+        let can_delete = grid.has_selection();
+        let restore = grid.selected_row_deleted();
+        let mut out = vec![
+            tool("console-add-row", Icon::Plus, "Row")
+                .tooltip(tooltip("Add a row to the table (filled in the grid, saved by Submit)", None))
+                .on_click(cx.listener(|this, _, window, cx| this.grid.update(cx, |g, cx| g.add_row(window, cx))))
+                .into_any_element(),
+        ];
+        if can_delete {
+            out.push(
+                tool("console-delete-row", Icon::Trash, if restore { "Restore" } else { "Delete" })
+                    .tooltip(tooltip("Mark the selected row for deletion (saved by Submit)", None))
+                    .on_click(cx.listener(|this, _, _, cx| this.grid.update(cx, |g, cx| g.delete_selected_row(cx))))
+                    .into_any_element(),
+            );
+        }
+        if pending > 0 {
+            out.push(div().px(px(4.)).text_color(color(c::YELLOW)).child(format!("{pending} row{} changed", if pending == 1 { "" } else { "s" })).into_any_element());
+            out.push(
+                tool("console-revert", Icon::Undo, "Revert")
+                    .tooltip(tooltip("Drop the pending edits", None))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.save_error = None;
+                        this.grid.update(cx, |g, cx| g.revert(cx));
+                    }))
+                    .into_any_element(),
+            );
+            out.push(
+                div()
+                    .id("console-submit")
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .h(px(22.))
+                    .px(px(9.))
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .bg(color(c::ACCENT))
+                    .hover(|s| s.bg(color_a(c::ACCENT, 0.85)))
+                    .text_color(color(0xFFFFFF))
+                    .child(icon(Icon::Check, 13., color(0xFFFFFF)))
+                    .child(if self.saving { "Saving…" } else { "Submit" })
+                    .tooltip(tooltip("Save all changes in one transaction, then run the query again", None))
+                    .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
+                    .into_any_element(),
+            );
+        }
+        out.push(div().w(px(1.)).h(px(14.)).mx(px(2.)).bg(color(c::BORDER)).into_any_element());
+        out
+    }
+
+    /// Why Submit failed (with the statement), above the rows.
+    fn render_save_error(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let (message, sql) = self.save_error.clone()?;
+        Some(
+            div()
+                .flex()
+                .flex_none()
+                .items_start()
+                .gap(px(8.))
+                .mx(px(10.))
+                .mt(px(8.))
+                .p(px(10.))
+                .rounded(px(8.))
+                .bg(color_a(c::RED, 0.08))
+                .border_1()
+                .border_color(color_a(c::RED, 0.35))
+                .font_family(theme::fonts().ui)
+                .text_size(px(theme::UI_SMALL))
+                .child(icon(Icon::Error, 14., color(c::RED)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .gap(px(4.))
+                        .child(div().text_color(color(c::RED)).child(message))
+                        .when_some(sql, |d, sql| d.child(div().font_family(theme::fonts().code).text_color(color(c::TEXT_MUTED)).child(sql))),
+                )
+                .child(div().id("console-save-error-close").cursor_pointer().child(icon(Icon::Close, 13., color(c::TEXT_DIM))).on_click(cx.listener(|this, _, _, cx| {
+                    this.save_error = None;
+                    cx.notify();
+                }))),
+        )
+    }
+
     /// Save the result as a file (INSERTs go into a table called `result`).
     fn export(&mut self, format: ExportFormat, cx: &mut Context<Self>) {
         let store = self.store.read(cx);

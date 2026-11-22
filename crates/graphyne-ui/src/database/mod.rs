@@ -247,6 +247,35 @@ impl DbStore {
 }
 
 /// `1234567` → `1,234,567`.
+/// The statements that save a grid's pending edits to `table` (quoted): DELETEs, UPDATEs,
+/// then INSERTs. `columns` are the table's names of the grid's columns; rows are found by
+/// the `keys` columns' loaded values.
+pub(crate) fn edit_statements(kind: &DbKind, table: &str, keys: &[String], columns: &[String], rows: &[Vec<graphyne_db::Value>], edits: &grid::Edits) -> Result<Vec<graphyne_db::EditStatement>, String> {
+    let key_at: Vec<usize> = keys.iter().filter_map(|k| columns.iter().position(|c| c == k)).collect();
+    if key_at.len() != keys.len() {
+        return Err("the primary key's columns are not in the loaded rows".into());
+    }
+    let key_of = |r: usize| -> Vec<(&str, &graphyne_db::Value)> { key_at.iter().map(|&i| (columns[i].as_str(), &rows[r][i])).collect() };
+    let mut statements = Vec::new();
+    for &r in &edits.deleted {
+        statements.push(kind.delete_sql(table, &key_of(r)));
+    }
+    let mut by_row: std::collections::BTreeMap<usize, Vec<(&str, &graphyne_db::CellEdit)>> = std::collections::BTreeMap::new();
+    for ((r, col), edit) in &edits.cells {
+        if !edits.deleted.contains(r) {
+            by_row.entry(*r).or_default().push((columns[*col].as_str(), edit));
+        }
+    }
+    for (r, set) in &by_row {
+        statements.push(kind.update_sql(table, set, &key_of(*r)));
+    }
+    for added in &edits.added {
+        let values: Vec<(&str, &graphyne_db::CellEdit)> = added.iter().map(|(col, edit)| (columns[*col].as_str(), edit)).collect();
+        statements.push(kind.insert_sql(table, &values));
+    }
+    Ok(statements)
+}
+
 pub(crate) fn group_digits(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
