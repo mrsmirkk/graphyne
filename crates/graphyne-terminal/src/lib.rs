@@ -211,6 +211,8 @@ pub struct SpawnOptions {
     pub command: Option<(String, Vec<String>)>,
     /// Extra environment for the child (e.g. a debug adapter's `runInTerminal` env).
     pub env: Vec<(String, String)>,
+    /// Folders to put first on PATH (e.g. the project's virtualenv).
+    pub path_prepend: Vec<PathBuf>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -368,6 +370,14 @@ impl TerminalState {
         cmd.env("TERM_PROGRAM", "Graphyne");
         for (k, v) in &opts.env {
             cmd.env(k, v);
+        }
+        if !opts.path_prepend.is_empty() {
+            // Keys are case-insensitive here on Windows ("Path" / "PATH").
+            let base = cmd.get_env("PATH").map(|p| p.to_os_string()).unwrap_or_default();
+            let dirs: Vec<PathBuf> = opts.path_prepend.iter().cloned().chain(std::env::split_paths(&base)).collect();
+            if let Ok(path) = std::env::join_paths(dirs) {
+                cmd.env("PATH", path);
+            }
         }
         let child = pair.slave.spawn_command(cmd).with_context(|| format!("spawning {program}"))?;
         drop(pair.slave);

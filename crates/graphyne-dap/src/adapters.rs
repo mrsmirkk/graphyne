@@ -151,8 +151,8 @@ fn node(file: &Path, dir: &Path, title: &str) -> Result<Resolved, String> {
 }
 
 fn python(file: &Path, dir: &Path, title: &str, root: &Path) -> Result<Resolved, String> {
-    // The project's .venv first (Graphyne sets it up with debugpy), then the system Python.
-    let python = graphyne_core::python_env::project_python(root)
+    // The project's interpreter (picked in the status bar, or its .venv with debugpy), then the system Python.
+    let python = graphyne_core::python_env::interpreter(root)
         .or_else(|| which(if cfg!(windows) { "python" } else { "python3" }))
         .or_else(|| which("python"))
         .ok_or("Python interpreter not found on PATH")?;

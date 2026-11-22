@@ -26,10 +26,21 @@
   `vtsls` / `typescript-language-server`, `lua-language-server` и т.д. Без сервера работают
   подсветка синтаксиса и автодополнение по словам из файла.
 - **Python** — достаточно установленного Python 3: когда в проекте появляется `.py`-файл (или при
-  первом Run / Debug), Graphyne сам создаёт `.venv` и ставит туда `debugpy`; Run, Debug и pyright
-  используют этот `.venv`. Если есть `requirements.txt`, Graphyne спрашивает, установить ли пакеты
+  первом Run / Debug), Graphyne сам создаёт `.venv` и ставит туда `debugpy`; Run, Debug, pyright и
+  встроенные терминалы используют этот `.venv` — `pip install` в терминале ставит пакет туда же,
+  откуда его возьмёт Run. Если есть `requirements.txt`, Graphyne спрашивает, установить ли пакеты
   (Install / Not now / Don't ask again) — без согласия ничего не ставит; после изменения файла
   спросит снова. Проекты Poetry / Pipenv / conda не трогает. Выключается в Settings → Run & Debug.
+- **Выбор интерпретатора Python** — клик по версии Python справа в строке состояния (или
+  «Python: Select Interpreter…» в поиске действий). В списке — окружения проекта, все Python,
+  которые знает `py`, окружения conda и `python` из PATH. Там же «Create / Recreate .venv with
+  Python 3.x» — если библиотека ещё не поддерживает самый новый Python (старый `.venv` уходит в
+  Корзину), и «Choose python.exe…» для интерпретатора в другом месте. Выбор запоминается для
+  каждого проекта.
+- **Нет библиотеки** — если pyright подчеркнул импорт, `Alt+Enter` → «Install package "…"»
+  запустит pip для интерпретатора проекта во вкладке терминала (известные расхождения имён
+  учтены: `cv2` → `opencv-python`, `PIL` → `pillow`, `yaml` → `pyyaml` и др.). После установки
+  подчёркивание пропадёт само.
 - **Отладка JavaScript и TypeScript** — нужен Node.js. При первой отладке Graphyne скачивает
   отладчик Microsoft `js-debug` (около 1 МБ, сверяет SHA-256) в свою папку в `%APPDATA%\Graphyne`;
   без интернета можно распаковать его самому и указать путь в переменной `GRAPHYNE_JS_DEBUG_PATH`.

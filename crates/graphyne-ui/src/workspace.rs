@@ -40,6 +40,8 @@ enum Menu {
     App,
     /// "+" in the left panel: init.lua, plugins folder, plugin tabs.
     Plugins,
+    /// Status bar: the project's Python interpreter.
+    Python,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -90,6 +92,16 @@ enum PyEnv {
 enum AfterEnv {
     Run(PathBuf),
     Debug(PathBuf),
+    PipInstall(String),
+}
+
+/// What the file watcher saw, before debouncing.
+enum FsChange {
+    /// HEAD / index / refs.
+    Git,
+    /// A package installed or removed in the project's virtualenv.
+    Packages,
+    File(PathBuf),
 }
 
 #[derive(Clone)]
@@ -153,6 +165,17 @@ pub struct Workspace {
     requirements_snoozed: bool,
     /// Background pip install of requirements.txt (status bar text).
     pip_status: Option<SharedString>,
+    /// The project's Python as the status bar shows it ("Python 3.12.4 (.venv)").
+    python_label: Option<SharedString>,
+    python_label_asked: bool,
+    /// Interpreters for the status-bar menu (None while looking for them).
+    interpreters: Option<Vec<graphyne_core::python_env::Interpreter>>,
+    /// "Recreate .venv with …" clicked once: the base it would use (a second click confirms).
+    venv_confirm: Option<PathBuf>,
+    /// Packages changed in the project's environment: refresh the language server soon.
+    packages_refresh: Option<gpui::Task<()>>,
+    /// Languages of the project with a toolchain (External Libraries).
+    library_langs: Vec<LanguageId>,
     /// Compilers / runtimes Run needs that aren't installed (status bar, messages).
     missing_tools: HashMap<LanguageId, graphyne_core::toolchain::MissingTool>,
     /// Languages already checked for a missing compiler this session.
@@ -268,6 +291,7 @@ impl Workspace {
             PaneEvent::OpenLocation(path, line, col) => this.open_file(path.clone(), Some((*line, *col)), window, cx),
             PaneEvent::ApplyEdits(files) => this.apply_file_edits(files.clone(), cx),
             PaneEvent::Notify(msg) => this.notify_user(msg.clone(), false, cx),
+            PaneEvent::PipInstall(package) => this.pip_install(package.clone(), window, cx),
         }));
         subs.push(cx.subscribe(&lsp_store, |this, _, ev, cx| match ev {
             crate::lsp_store::LspStoreEvent::Notify(msg, err) => this.notify_user(msg.clone(), *err, cx),
@@ -370,6 +394,12 @@ impl Workspace {
             ask_requirements: None,
             requirements_snoozed: false,
             pip_status: None,
+            python_label: None,
+            python_label_asked: false,
+            interpreters: None,
+            venv_confirm: None,
+            packages_refresh: None,
+            library_langs: Vec::new(),
             missing_tools: HashMap::new(),
             checked_tools: HashSet::new(),
             window_handle: window.window_handle(),
@@ -409,6 +439,7 @@ impl Workspace {
 
     /// Put back the layout saved by [`Self::project_state`].
     fn apply_state(&mut self, s: ProjectState, window: &mut Window, cx: &mut Context<Self>) {
+        graphyne_core::python_env::set_chosen(&self.root, s.python.clone());
         self.left = s.left;
         self.right = s.right;
         self.bottom = s.bottom;
@@ -471,6 +502,7 @@ impl Workspace {
             active_tab,
             expanded: self.file_tree.read(cx).expanded_dirs(),
             db_expanded: self.db_panel.read(cx).expanded_keys(cx),
+            python: graphyne_core::python_env::chosen(&self.root),
         }
     }
 
@@ -525,8 +557,10 @@ impl Workspace {
                 }
             }
             let files = Arc::new(files);
+            let langs_for_later = langs.clone();
             this.update(cx, |this, cx| {
                 this.files = files.clone();
+                this.library_langs = langs_for_later;
                 this.indexing = false;
                 if let Some((s, _)) = &this.search {
                     s.update(cx, |s, cx| s.set_files(files, cx));
@@ -540,7 +574,7 @@ impl Workspace {
                     let mut seen = HashSet::new();
                     langs
                         .into_iter()
-                        .filter_map(|l| graphyne_core::toolchain::probe(l).map(|v| (l, v)))
+                        .filter_map(|l| library_label(l, &lib_root).map(|v| (l, v)))
                         .filter(|(_, v)| seen.insert(v.clone()))
                         .map(|(l, v)| (l, v, graphyne_core::libraries::entries_for(l, &lib_root)))
                         .collect::<Vec<_>>()
@@ -563,7 +597,7 @@ impl Workspace {
     /// thread; bursts are debounced and coalesced before touching the UI.
     fn start_watcher(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
-        let (tx, rx) = flume::unbounded::<(bool, PathBuf)>();
+        let (tx, rx) = flume::unbounded::<FsChange>();
         cx.spawn(async move |this, cx| {
             let watch_root = root.clone();
             let watcher = cx
@@ -576,8 +610,10 @@ impl Workspace {
                             return;
                         }
                         for p in ev.paths {
-                            if let Some(git_only) = classify_fs_change(&classify_root, &p) {
-                                let _ = tx.send((git_only, p));
+                            if is_package_change(&classify_root, &p) {
+                                let _ = tx.send(FsChange::Packages);
+                            } else if let Some(git_only) = classify_fs_change(&classify_root, &p) {
+                                let _ = tx.send(if git_only { FsChange::Git } else { FsChange::File(p) });
                             }
                         }
                     })
@@ -594,14 +630,27 @@ impl Workspace {
                 cx.background_executor().timer(Duration::from_millis(300)).await;
                 let mut files: Vec<PathBuf> = Vec::new();
                 let mut git = false;
-                for (git_only, p) in std::iter::once(first).chain(rx.try_iter()) {
-                    if git_only {
-                        git = true;
-                    } else if !files.contains(&p) {
-                        files.push(p);
+                let mut packages = false;
+                for change in std::iter::once(first).chain(rx.try_iter()) {
+                    match change {
+                        FsChange::Git => git = true,
+                        FsChange::Packages => packages = true,
+                        FsChange::File(p) => {
+                            if !files.contains(&p) {
+                                files.push(p);
+                            }
+                        }
                     }
                 }
-                if this.update(cx, |this, cx| this.on_fs_change(files, git, cx)).is_err() {
+                let alive = this.update(cx, |this, cx| {
+                    if packages {
+                        this.packages_changed(cx);
+                    }
+                    if git || !files.is_empty() {
+                        this.on_fs_change(files, git, cx);
+                    }
+                });
+                if alive.is_err() {
                     break;
                 }
             }
@@ -724,6 +773,9 @@ impl Workspace {
     fn probe_active_toolchain(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.pane.read(cx).active_editor() else { return };
         let lang = editor.read(cx).language;
+        if lang == LanguageId::Python && !self.python_label_asked {
+            self.refresh_python_label(cx);
+        }
         if let Some(path) = editor.read(cx).path.clone() {
             self.check_run_tool(lang, path, cx);
         }
@@ -788,10 +840,7 @@ impl Workspace {
         let (tx, rx) = flume::unbounded::<graphyne_core::python_env::Step>();
         cx.spawn(async move |this, cx| {
             while let Ok(step) = rx.recv_async().await {
-                let text = match step {
-                    graphyne_core::python_env::Step::CreatingVenv => "Python: creating .venv…",
-                    graphyne_core::python_env::Step::InstallingDebugpy => "Python: installing debugpy…",
-                };
+                let text = step_text(step);
                 let still = this.update(cx, |this, cx| {
                     if matches!(this.py_env, PyEnv::Working(_)) {
                         this.py_env = PyEnv::Working(text.into());
@@ -825,6 +874,9 @@ impl Workspace {
             Ok(Outcome::Ready { created_venv, installed_debugpy, .. }) => {
                 self.py_env = PyEnv::Ready;
                 self.check_requirements(cx);
+                if created_venv || !self.python_label_asked {
+                    self.refresh_python_label(cx);
+                }
                 if created_venv || installed_debugpy {
                     let done = if created_venv { "created .venv and installed debugpy" } else { "installed debugpy into the project's environment" };
                     self.notify_user(format!("Python: {done}. Run and Debug use it."), false, cx);
@@ -855,9 +907,320 @@ impl Workspace {
             match action {
                 AfterEnv::Run(path) => self.run_file(path, window, cx),
                 AfterEnv::Debug(path) => self.debug_file(path, window, cx),
+                AfterEnv::PipInstall(package) => self.pip_install(package, window, cx),
             }
         }
         cx.notify();
+    }
+
+    // ---------------------------------------------------------------- Python interpreter
+
+    /// The status-bar label of the project's interpreter (looked up in the background).
+    fn refresh_python_label(&mut self, cx: &mut Context<Self>) {
+        self.python_label_asked = true;
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let label = cx
+                .background_spawn(async move { graphyne_core::python_env::interpreter(&root).and_then(|p| graphyne_core::python_env::inspect(&p)).map(|i| i.label()) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.python_label = label.map(SharedString::from);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The project's interpreter changed: tell the language server, re-check the
+    /// environment on the next Run / Debug, refresh labels and External Libraries.
+    fn python_changed(&mut self, cx: &mut Context<Self>) {
+        self.py_env = PyEnv::Unknown;
+        self.ask_requirements = None;
+        self.requirements_snoozed = false;
+        self.check_requirements(cx);
+        if let Some(client) = self.lsp_store.read(cx).client_for(LanguageId::Python) {
+            client.notify("workspace/didChangeConfiguration", serde_json::json!({ "settings": {} }));
+        }
+        self.refresh_python_label(cx);
+        self.refresh_libraries(cx);
+        self.file_tree.update(cx, |t, cx| t.refresh(cx));
+        cx.notify();
+    }
+
+    /// External Libraries again (after the Python interpreter changed).
+    fn refresh_libraries(&mut self, cx: &mut Context<Self>) {
+        let langs = self.library_langs.clone();
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let probes = cx
+                .background_spawn(async move {
+                    let mut seen = HashSet::new();
+                    langs
+                        .into_iter()
+                        .filter_map(|l| library_label(l, &root).map(|v| (l, v)))
+                        .filter(|(_, v)| seen.insert(v.clone()))
+                        .map(|(l, v)| (l, v.clone(), graphyne_core::libraries::entries_for(l, &root)))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let libs = probes.iter().map(|(_, v, entries)| (SharedString::from(format!("< {v} >")), entries.clone())).collect();
+                this.file_tree.update(cx, |t, cx| t.set_libraries(libs, cx));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Use `python` for this project's Run, Debug, code analysis and new terminals.
+    fn choose_interpreter(&mut self, python: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        let name = self
+            .interpreters
+            .as_ref()
+            .and_then(|list| list.iter().find(|i| i.path == python))
+            .map(|i| i.label())
+            .unwrap_or_else(|| python.display().to_string());
+        graphyne_core::python_env::set_chosen(&self.root, Some(python));
+        self.save_state(window, cx);
+        self.python_changed(cx);
+        self.notify_user(format!("{name} is now used by Run, Debug and code analysis, and by terminals you open from now on."), false, cx);
+    }
+
+    /// "Choose python.exe…": any interpreter on disk, checked before it is used.
+    fn browse_interpreter(&mut self, cx: &mut Context<Self>) {
+        self.menu = None;
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Use".into()), directory: Some(self.root.clone()) });
+        let handle = self.window_handle;
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let checked = path.clone();
+            let found = cx.background_spawn(async move { graphyne_core::python_env::inspect(&checked) }).await;
+            cx.update(|cx| {
+                handle
+                    .update(cx, |_, window, cx| {
+                        this.update(cx, |this, cx| match found {
+                            Some(i) => {
+                                this.interpreters = Some(vec![i.clone()]);
+                                this.choose_interpreter(i.path, window, cx);
+                            }
+                            None => {
+                                this.notify_user(format!("{} is not a working Python interpreter.", path.display()), true, cx);
+                                this.show_notifications = true;
+                                this.unread = false;
+                            }
+                        })
+                        .ok();
+                    })
+                    .ok();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A new `.venv` from the installation `base` (the old one goes to the Recycle Bin), then
+    /// debugpy into it, as for any new environment.
+    fn create_venv(&mut self, base: PathBuf, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.venv_confirm = None;
+        if matches!(self.py_env, PyEnv::Working(_)) {
+            self.notify_user("Python: wait for the current environment step to finish.", false, cx);
+            return;
+        }
+        let version = self.interpreters.as_ref().and_then(|l| l.iter().find(|i| i.path == base)).map(|i| i.version.clone()).unwrap_or_default();
+        self.py_env = PyEnv::Working(step_text(graphyne_core::python_env::Step::CreatingVenv).into());
+        cx.notify();
+        let root = self.root.clone();
+        let (tx, rx) = flume::unbounded::<graphyne_core::python_env::Step>();
+        cx.spawn(async move |this, cx| {
+            while let Ok(step) = rx.recv_async().await {
+                let alive = this.update(cx, |this, cx| {
+                    if matches!(this.py_env, PyEnv::Working(_)) {
+                        this.py_env = PyEnv::Working(step_text(step).into());
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let handle = self.window_handle;
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move { graphyne_core::python_env::create_venv(&root, &base, |s| drop(tx.send(s))) }).await;
+            cx.update(|cx| {
+                handle
+                    .update(cx, |_, window, cx| {
+                        this.update(cx, |this, cx| match result {
+                            Ok(python) => {
+                                graphyne_core::python_env::set_chosen(&this.root, Some(python));
+                                this.save_state(window, cx);
+                                this.python_changed(cx);
+                                this.notify_user(format!("Python: created .venv with Python {version}. Run, Debug, code analysis and new terminals use it."), false, cx);
+                                // debugpy, like any environment Graphyne sets up.
+                                this.start_python_env(cx);
+                            }
+                            Err(e) => {
+                                this.py_env = PyEnv::Failed;
+                                this.notify_user(format!("Python: {e}"), true, cx);
+                                this.show_notifications = true;
+                                this.unread = false;
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    })
+                    .ok();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The "Install package" quick fix: pip for the project's interpreter, in a terminal tab.
+    fn pip_install(&mut self, package: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.ensure_python_env(cx) {
+            self.after_env.push(AfterEnv::PipInstall(package));
+            return;
+        }
+        let Some(python) = graphyne_core::python_env::interpreter(&self.root) else {
+            self.notify_user("No Python interpreter for this project yet: pick one in the status bar (bottom right).", true, cx);
+            self.show_notifications = true;
+            self.unread = false;
+            return;
+        };
+        let shell = ShellKind::native();
+        let exe = graphyne_core::run::quote(shell, &python);
+        let command = if shell == ShellKind::PowerShell { format!("& {exe} -m pip install {package}") } else { format!("{exe} -m pip install {package}") };
+        let line = graphyne_core::run::pty_line(shell, &self.root, &command);
+        if self.detached.is_none() {
+            self.bottom = true;
+        }
+        self.bottom_view = BottomView::Terminal;
+        let root = self.root.clone();
+        self.terminal.update(cx, |t, cx| t.run_in_tab(&format!("pip install {package}"), root, &line, cx));
+        self.terminal.read(cx).focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// pip changed the project's site-packages: once it settles, the language server
+    /// re-resolves imports (a just-installed package stops being "could not be resolved").
+    fn packages_changed(&mut self, cx: &mut Context<Self>) {
+        self.packages_refresh = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(1500)).await;
+            this.update(cx, |this, cx| {
+                this.packages_refresh = None;
+                if let Some(client) = this.lsp_store.read(cx).client_for(LanguageId::Python) {
+                    client.notify("workspace/didChangeConfiguration", serde_json::json!({ "settings": {} }));
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// The interpreter menu (status bar, bottom right).
+    fn render_python_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        if self.menu != Some(Menu::Python) {
+            return None;
+        }
+        let current = graphyne_core::python_env::interpreter(&self.root);
+        let is_current = |p: &std::path::Path| current.as_ref().is_some_and(|c| c.to_string_lossy().eq_ignore_ascii_case(&p.to_string_lossy()));
+        let row = |id: gpui::ElementId, label: SharedString, detail: Option<SharedString>, checked: bool| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(10.))
+                .py(px(6.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(|s| s.bg(color(c::HOVER)))
+                .child(div().w(px(14.)).flex_none().when(checked, |d| d.child(icon(Icon::Check, 13., color(c::ACCENT)))))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(div().text_color(color(c::TEXT)).child(label))
+                        .when_some(detail, |d, t| d.child(div().text_size(px(11.5)).text_color(color(c::TEXT_DIM)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t))),
+                )
+        };
+        let section = |label: &'static str| div().px(px(10.)).pt(px(8.)).pb(px(2.)).text_size(px(11.)).text_color(color(c::TEXT_FAINT)).child(label);
+        let note = |text: &'static str| div().px(px(10.)).py(px(6.)).text_color(color(c::TEXT_DIM)).child(text);
+        let has_venv = self.root.join(".venv").join("pyvenv.cfg").is_file();
+        let mut panel = div()
+            .id("python-menu")
+            .occlude()
+            .absolute()
+            .right(px(12.))
+            .bottom(px(theme::STATUS_BAR_HEIGHT + 2.))
+            .w(px(460.))
+            .max_h(px(520.))
+            .overflow_y_scroll()
+            .p(px(6.))
+            .rounded(px(10.))
+            .bg(color(c::POPUP))
+            .border_1()
+            .border_color(color(c::POPUP_BORDER))
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.menu = None;
+                this.venv_confirm = None;
+                cx.notify();
+            }))
+            .child(section("PYTHON INTERPRETER"));
+        match &self.interpreters {
+            None => panel = panel.child(note("Looking for Python interpreters…")),
+            Some(list) if list.is_empty() => panel = panel.child(note("No Python found. Install it from python.org, then open this menu again.")),
+            Some(list) => {
+                for (ix, i) in list.iter().enumerate() {
+                    let path = i.path.clone();
+                    panel = panel.child(
+                        row(("py-interp", ix).into(), i.label().into(), Some(i.path.display().to_string().into()), is_current(&i.path))
+                            .on_click(cx.listener(move |this, _, window, cx| this.choose_interpreter(path.clone(), window, cx))),
+                    );
+                }
+                let bases: Vec<&graphyne_core::python_env::Interpreter> = list.iter().filter(|i| i.venv.is_none()).collect();
+                if !bases.is_empty() {
+                    panel = panel.child(section("NEW ENVIRONMENT"));
+                    for (ix, i) in bases.into_iter().enumerate() {
+                        let base = i.path.clone();
+                        let confirming = self.venv_confirm.as_ref() == Some(&i.path);
+                        let (label, detail): (SharedString, SharedString) = if !has_venv {
+                            (format!("Create .venv with Python {}", i.version).into(), "a virtual environment in the project folder, used from then on".into())
+                        } else if confirming {
+                            ("Click again to replace .venv".into(), "the current .venv goes to the Recycle Bin; packages are installed again from requirements.txt".into())
+                        } else {
+                            (format!("Recreate .venv with Python {}", i.version).into(), "the current .venv goes to the Recycle Bin".into())
+                        };
+                        panel = panel.child(
+                            row(("py-venv", ix).into(), label, Some(detail), false)
+                                .when(confirming, |d| d.text_color(color(c::YELLOW)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if has_venv && this.venv_confirm.as_ref() != Some(&base) {
+                                        this.venv_confirm = Some(base.clone());
+                                        cx.notify();
+                                    } else {
+                                        this.create_venv(base.clone(), cx);
+                                    }
+                                })),
+                        );
+                    }
+                }
+            }
+        }
+        panel = panel.child(div().mx(px(6.)).my(px(4.)).h(px(1.)).bg(color(c::BORDER))).child(
+            row("py-browse".into(), "Choose python.exe…".into(), Some("an interpreter somewhere else (Poetry, pyenv, a shared virtualenv)".into()), false)
+                .on_click(cx.listener(|this, _, _, cx| this.browse_interpreter(cx))),
+        );
+        Some(panel)
     }
 
     /// Does .venv lack the packages from requirements.txt? Then ask (never install unasked:
@@ -1321,6 +1684,10 @@ impl Workspace {
             IdeAction::CloseProject => self.close_project(window, cx),
             IdeAction::Plugins => self.pane.update(cx, |p, cx| p.open_plugins_page(window, cx)),
             IdeAction::Settings => self.pane.update(cx, |p, cx| p.open_settings_page(window, cx)),
+            IdeAction::PythonInterpreter => {
+                self.menu = None;
+                self.toggle_menu(Menu::Python, cx);
+            }
             IdeAction::Quit => self.quit(&Quit, window, cx),
         }
         cx.notify();
@@ -1986,6 +2353,23 @@ impl Workspace {
                                 .into_any_element(),
                         );
                     }
+                    None if lang == LanguageId::Python => {
+                        let label = self.python_label.clone().or_else(|| self.toolchains.get(&lang).cloned().flatten()).unwrap_or_else(|| "Python".into());
+                        let open = self.menu == Some(Menu::Python);
+                        right.push(
+                            div()
+                                .id("python-interpreter")
+                                .px(px(6.))
+                                .rounded(px(4.))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(color(c::HOVER)).text_color(color(c::TEXT)))
+                                .when(open, |d| d.bg(color(c::HOVER)).text_color(color(c::TEXT)))
+                                .child(label)
+                                .when(!open, |d| d.tooltip(tooltip("Python interpreter for Run, Debug, code analysis and terminals", None)))
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Python, cx)))
+                                .into_any_element(),
+                        );
+                    }
                     None => {
                         let toolchain = self.toolchains.get(&lang).cloned().flatten();
                         right.push(div().child(toolchain.unwrap_or_else(|| lang.name().into())).into_any_element());
@@ -2175,6 +2559,20 @@ impl Workspace {
             })
             .detach();
         }
+        if self.menu == Some(Menu::Python) {
+            self.interpreters = None;
+            self.venv_confirm = None;
+            let root = self.root.clone();
+            cx.spawn(async move |this, cx| {
+                let found = cx.background_spawn(async move { graphyne_core::python_env::discover(&root) }).await;
+                this.update(cx, |this, cx| {
+                    this.interpreters = Some(found);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
         if self.menu == Some(Menu::Projects) {
             cx.spawn(async move |this, cx| {
                 let recent = cx.background_spawn(async move { graphyne_core::recent::load() }).await;
@@ -2191,7 +2589,7 @@ impl Workspace {
 
     /// Projects menu (title-bar grid button) and main menu (gear).
     fn render_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let menu = self.menu?;
+        let menu = self.menu.filter(|m| *m != Menu::Python)?;
         let item = |id: &'static str, label: SharedString, detail: Option<SharedString>, shortcut: Option<&'static str>| {
             div()
                 .id(id)
@@ -2375,6 +2773,7 @@ impl Workspace {
                         }))
                     }))
             }
+            Menu::Python => unreachable!("drawn by render_python_menu"),
             Menu::App => panel
                 .right(px(130.))
                 .child(item("menu-settings", "Settings…".into(), None, Some("Ctrl+,")).on_click(cx.listener(|this, _, window, cx| {
@@ -2607,8 +3006,38 @@ impl Render for Workspace {
             .children(requirements_ask)
             .children(notifications)
             .children(menu)
+            .children(self.render_python_menu(cx))
             .children(self.db_form.clone())
     }
+}
+
+/// A package installed into or removed from the project's virtualenv: a `*.dist-info`
+/// folder in its site-packages (pip writes one per package).
+fn is_package_change(root: &std::path::Path, path: &std::path::Path) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else { return false };
+    let comps: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
+    let in_venv = comps.first().is_some_and(|c| graphyne_core::python_env::VENV_DIRS.contains(&c.as_str()));
+    in_venv && comps.iter().position(|c| c == "site-packages").and_then(|i| comps.get(i + 1)).is_some_and(|c| c.ends_with(".dist-info"))
+}
+
+/// Status text of a Python environment step.
+fn step_text(step: graphyne_core::python_env::Step) -> &'static str {
+    match step {
+        graphyne_core::python_env::Step::RemovingVenv => "Python: moving the old .venv to the Recycle Bin…",
+        graphyne_core::python_env::Step::CreatingVenv => "Python: creating .venv…",
+        graphyne_core::python_env::Step::InstallingDebugpy => "Python: installing debugpy…",
+    }
+}
+
+/// Group title of a language's External Libraries: its toolchain version; for Python, the
+/// interpreter the project uses ("Python 3.12.4 (.venv)"). Blocking.
+fn library_label(lang: LanguageId, root: &std::path::Path) -> Option<String> {
+    if lang == LanguageId::Python {
+        if let Some(i) = graphyne_core::python_env::interpreter(root).and_then(|p| graphyne_core::python_env::inspect(&p)) {
+            return Some(i.label());
+        }
+    }
+    graphyne_core::toolchain::probe(lang)
 }
 
 /// `Some(true)` = git metadata changed (HEAD / index / refs), `Some(false)` = project file,

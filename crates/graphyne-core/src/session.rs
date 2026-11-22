@@ -100,6 +100,8 @@ pub struct ProjectState {
     pub expanded: Vec<PathBuf>,
     /// Expanded nodes of the Database panel: connections, groups, tables.
     pub db_expanded: Vec<String>,
+    /// Python interpreter picked in the status bar (None: the project's `.venv`).
+    pub python: Option<PathBuf>,
 }
 
 impl Default for ProjectState {
@@ -119,6 +121,7 @@ impl Default for ProjectState {
             active_tab: 0,
             expanded: Vec::new(),
             db_expanded: Vec::new(),
+            python: None,
         }
     }
 }

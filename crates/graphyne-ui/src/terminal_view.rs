@@ -62,8 +62,8 @@ impl Focusable for TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(cwd: PathBuf, command: Option<(String, Vec<String>)>, env: Vec<(String, String)>, cx: &mut Context<Self>) -> Self {
-        let opts = SpawnOptions { cwd: cwd.clone(), command, env, cols: 120, rows: 24 };
+    pub fn new(cwd: PathBuf, command: Option<(String, Vec<String>)>, env: Vec<(String, String)>, path_prepend: Vec<PathBuf>, cx: &mut Context<Self>) -> Self {
+        let opts = SpawnOptions { cwd: cwd.clone(), command, env, path_prepend, cols: 120, rows: 24 };
         // Spawning a PTY can take tens of ms (ConPTY): never on the UI thread.
         let spawn = cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(async move { TerminalState::spawn(opts) }).await;
@@ -587,7 +587,10 @@ impl TerminalPanel {
         env: Vec<(String, String)>,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalView> {
-        let view = cx.new(|cx| TerminalView::new(cwd, command, env, cx));
+        // `python` / `pip` in the project's terminals are the project's interpreter.
+        let (mut vars, path_prepend) = graphyne_core::python_env::terminal_env(&self.root);
+        vars.extend(env);
+        let view = cx.new(|cx| TerminalView::new(cwd, command, vars, path_prepend, cx));
         let sub = cx.subscribe(&view, |this, view, event, cx| match event {
             TerminalViewEvent::OpenFile(path, line, col) => cx.emit(TerminalPanelEvent::OpenFile(path.clone(), *line, *col)),
             TerminalViewEvent::Exited => {

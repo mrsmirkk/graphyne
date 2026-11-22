@@ -133,7 +133,7 @@ pub fn missing_for_run(lang: LanguageId, file: &std::path::Path, root: &std::pat
     let program = run_program(lang, file, root)?;
     let installed = match program {
         // The project's .venv, or a real Python (not the Microsoft Store placeholder).
-        "python" => crate::python_env::project_python(root).is_some() || crate::python_env::base_python().is_some(),
+        "python" => crate::python_env::interpreter(root).is_some() || crate::python_env::base_python().is_some(),
         _ => which(program).is_some(),
     };
     if installed {

@@ -66,13 +66,12 @@ fn rust(root: &Path) -> Vec<LibraryEntry> {
     out
 }
 
-/// The project's virtualenv (`.venv`, `venv`, `env`) if any, else `python` on PATH:
-/// its stdlib and site-packages folders.
+/// The project's interpreter (picked in the status bar, or its virtualenv) if any, else
+/// `python` on PATH: its stdlib and site-packages folders.
 fn python(root: &Path) -> Vec<LibraryEntry> {
-    let venv_python = [".venv", "venv", "env"].iter().map(|d| root.join(d)).find(|d| d.join("pyvenv.cfg").is_file()).map(|venv| {
-        if cfg!(windows) { venv.join("Scripts").join("python.exe") } else { venv.join("bin").join("python") }
-    });
-    let program = venv_python.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "python".to_string());
+    let interpreter = crate::python_env::interpreter(root);
+    let in_venv = interpreter.as_ref().is_some_and(|p| crate::python_env::venv_of(p).is_some());
+    let program = interpreter.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "python".to_string());
     let script = "import sysconfig as s; p = s.get_paths(); print(p['stdlib']); print(p['purelib'])";
     let Some(text) = run(&program, &["-c", script], root) else { return Vec::new() };
     let mut lines = text.lines().map(str::trim);
@@ -81,7 +80,7 @@ fn python(root: &Path) -> Vec<LibraryEntry> {
         out.extend(dir_entry("stdlib", PathBuf::from(stdlib)));
     }
     if let Some(site) = lines.next() {
-        let label = if venv_python.is_some() { "site-packages (venv)" } else { "site-packages" };
+        let label = if in_venv { "site-packages (venv)" } else { "site-packages" };
         out.extend(dir_entry(label, PathBuf::from(site)));
     }
     out

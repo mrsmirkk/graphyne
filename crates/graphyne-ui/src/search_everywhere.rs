@@ -35,6 +35,7 @@ pub enum IdeAction {
     CloseProject,
     Plugins,
     Settings,
+    PythonInterpreter,
     Quit,
 }
 
@@ -62,6 +63,7 @@ const ACTIONS: &[(&str, &str, IdeAction)] = &[
     ("Close Project", "", IdeAction::CloseProject),
     ("Plugins", "", IdeAction::Plugins),
     ("Settings", "settings", IdeAction::Settings),
+    ("Python: Select Interpreter…", "", IdeAction::PythonInterpreter),
     ("Exit", "exit", IdeAction::Quit),
 ];
 

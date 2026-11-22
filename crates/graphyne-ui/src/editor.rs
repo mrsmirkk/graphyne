@@ -58,6 +58,8 @@ pub enum EditorEvent {
     /// Code-action edits that touch other files.
     ApplyEdits(Vec<graphyne_lsp::model::FileEdits>),
     Notify(String),
+    /// "Install package" quick fix: pip install this into the project's interpreter.
+    PipInstall(String),
 }
 
 #[derive(Clone)]

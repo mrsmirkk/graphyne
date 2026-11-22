@@ -10,6 +10,10 @@ use graphyne_lsp::convert::{char_to_position, path_key, path_to_uri, position_to
 use graphyne_lsp::model::{self, Action, Diag, Edit, Severity, Signature};
 use graphyne_lsp::{LspClient, snippet};
 use serde_json::{Value, json};
+use std::path::Path;
+
+/// Command of Graphyne's own "Install package" quick fix (never sent to the server).
+const PIP_INSTALL: &str = "graphyne.pipInstall";
 
 #[derive(Clone, Debug)]
 pub(super) struct EditorDiag {
@@ -768,16 +772,56 @@ impl Editor {
 
     // ------------------------------------------------------------------ code actions (Alt+Enter)
 
+    /// "Install package" for imports Pyright can't resolve under the caret: runs pip for the
+    /// project's interpreter (Graphyne's own action, not the language server's).
+    fn pip_install_actions(&self, r: &Range<usize>) -> Vec<Action> {
+        if self.language != LanguageId::Python {
+            return Vec::new();
+        }
+        let dir = self.path.as_ref().and_then(|p| p.parent()).map(Path::to_path_buf);
+        let mut out: Vec<Action> = Vec::new();
+        for d in self.lsp.diags.iter().filter(|d| d.range.start <= r.end.max(r.start + 1) && r.start <= d.range.end) {
+            let Some(module) = graphyne_core::python_env::missing_import(&d.message) else { continue };
+            // A module of the project itself (misspelled, or not on the path): nothing to install.
+            if dir.as_ref().is_some_and(|dir| dir.join(format!("{module}.py")).is_file() || dir.join(&module).is_dir()) {
+                continue;
+            }
+            let package = graphyne_core::python_env::pip_package(&module).to_string();
+            if out.iter().any(|a| a.command.as_ref().is_some_and(|c| c["arguments"][0] == package.as_str())) {
+                continue;
+            }
+            out.push(Action {
+                title: format!("Install package \"{package}\" (pip install {package})"),
+                kind: "quickfix".into(),
+                preferred: true,
+                disabled: None,
+                edits: None,
+                command: Some(json!({ "command": PIP_INSTALL, "arguments": [package] })),
+                raw: Value::Null,
+            });
+        }
+        out
+    }
+
     pub(super) fn show_code_actions(&mut self, _: &ShowCodeActions, _: &mut Window, cx: &mut Context<Self>) {
+        let r = self.sel.range();
+        let pip = self.pip_install_actions(&r);
         let Some(client) = self.lsp.client.clone().filter(|c| c.supports("codeActionProvider")) else {
-            cx.emit(EditorEvent::Notify("Quick fixes need a language server for this file".into()));
+            if pip.is_empty() {
+                cx.emit(EditorEvent::Notify("Quick fixes need a language server for this file".into()));
+            } else {
+                self.lsp.hover = None;
+                self.lsp.hover_timer = None;
+                let anchor = self.caret_point().unwrap_or_default();
+                self.lsp.actions = Some(ActionsPopup { anchor, actions: pip, selected: 0 });
+                cx.notify();
+            }
             return;
         };
         self.lsp_flush();
         let Some(uri) = self.uri() else { return };
         self.lsp.hover = None;
         self.lsp.hover_timer = None;
-        let r = self.sel.range();
         let rope = self.buffer.rope();
         let diags: Vec<Value> = self
             .lsp
@@ -797,6 +841,7 @@ impl Editor {
             this.update(cx, |e, cx| {
                 let mut actions: Vec<Action> = actions.into_iter().filter(|a| a.disabled.is_none()).collect();
                 actions.sort_by_key(|a| (!a.preferred, !a.kind.starts_with("quickfix")));
+                actions.splice(0..0, pip);
                 if actions.is_empty() {
                     cx.emit(EditorEvent::Notify("No quick fixes or intentions available here".into()));
                     return;
@@ -815,7 +860,7 @@ impl Editor {
         let Some(popup) = &self.lsp.actions else { return };
         let ix = popup.selected;
         let Some(action) = popup.actions.get(ix) else { return };
-        if action.edits.is_some() || !client.code_action_resolve() {
+        if action.edits.is_some() || action.raw.is_null() || !client.code_action_resolve() {
             return;
         }
         let raw = action.raw.clone();
@@ -850,7 +895,7 @@ impl Editor {
         let Some(popup) = self.lsp.actions.take() else { return };
         let Some(action) = popup.actions.get(popup.selected).cloned() else { return };
         let client = self.lsp.client.clone();
-        if action.edits.is_none() && client.as_ref().is_some_and(|c| c.code_action_resolve()) {
+        if action.edits.is_none() && !action.raw.is_null() && client.as_ref().is_some_and(|c| c.code_action_resolve()) {
             let Some(client) = client else { return };
             cx.spawn(async move |this, cx| {
                 let resolved = client.request("codeAction/resolve", action.raw.clone()).await.ok().and_then(|v| model::parse_code_action(&v)).unwrap_or(action);
@@ -864,6 +909,13 @@ impl Editor {
     }
 
     fn apply_action_now(&mut self, action: Action, cx: &mut Context<Self>) {
+        if let Some(cmd) = action.command.as_ref().filter(|c| c["command"] == PIP_INSTALL) {
+            if let Some(package) = cmd["arguments"][0].as_str() {
+                cx.emit(EditorEvent::PipInstall(package.to_string()));
+            }
+            cx.notify();
+            return;
+        }
         let mut others = Vec::new();
         for file in action.edits.unwrap_or_default() {
             if self.is_my_path(&file.path) {

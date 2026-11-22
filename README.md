@@ -113,7 +113,20 @@ single portable `.exe`.
 
 ### Python projects
 - When a Python file appears in a project (or on the first Run / Debug), Graphyne creates `.venv`
-  and installs `debugpy`. Run, Debug and the language server all use that interpreter.
+  and installs `debugpy`. Run, Debug, the language server **and the built-in terminals** all use
+  that interpreter, so `pip install` in a terminal installs into the same environment Run uses.
+- **Interpreter picker** in the status bar (or *Python: Select Interpreter…* in Search Everywhere):
+  - the project's virtual environments, every Python the `py` launcher knows, conda environments
+    and `python` on PATH, with their versions;
+  - **Create / Recreate `.venv` with Python 3.x**, for libraries that don't support the newest
+    Python yet (the old `.venv` goes to the Recycle Bin);
+  - *Choose python.exe…* for an interpreter elsewhere (Poetry, pyenv, a shared virtualenv).
+
+  The choice is remembered per project.
+- **Install missing packages**: on an import Pyright can't resolve, `Alt+Enter` offers
+  *Install package "…"*, which runs pip for the project's interpreter in a terminal tab (common
+  name differences are known: `cv2` → `opencv-python`, `PIL` → `pillow`, `yaml` → `pyyaml`, …).
+  After pip finishes, the import is checked again by itself.
 - If there is a `requirements.txt`, Graphyne **asks** before installing it (Install / Not now /
   Don't ask again) and asks again when the file changes. Poetry, Pipenv and conda projects are left
   to their own tools.
@@ -200,7 +213,7 @@ Planned, roughly in this order:
       (connections, the schema browser, the SQL console, editing, export and CSV import are done).
 - [ ] **Debugging beyond Python and JavaScript** verified end to end: Rust / C / C++ (`lldb-dap`),
       Go (`delve`).
-- [ ] **Python**: dependencies from `pyproject.toml` (uv, Poetry, PDM) and an interpreter picker.
+- [ ] **Python**: dependencies from `pyproject.toml` (uv, Poetry, PDM).
 - [ ] **macOS and Linux** builds (GPUI supports both; Graphyne isn't tested there yet).
 - [ ] **Faster start-up** — most of today's ~0.4 s goes to Direct3D initialization.
 - [ ] Easier extension install (from a URL or a gallery).

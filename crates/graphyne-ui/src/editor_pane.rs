@@ -59,6 +59,7 @@ pub enum PaneEvent {
     OpenLocation(PathBuf, usize, usize),
     ApplyEdits(Vec<graphyne_lsp::model::FileEdits>),
     Notify(String),
+    PipInstall(String),
 }
 
 pub struct EditorPane {
@@ -429,6 +430,7 @@ impl EditorPane {
             EditorEvent::OpenLocation(p, l, c) => cx.emit(PaneEvent::OpenLocation(p.clone(), *l, *c)),
             EditorEvent::ApplyEdits(e) => cx.emit(PaneEvent::ApplyEdits(e.clone())),
             EditorEvent::Notify(m) => cx.emit(PaneEvent::Notify(m.clone())),
+            EditorEvent::PipInstall(p) => cx.emit(PaneEvent::PipInstall(p.clone())),
         }));
         editor
     }

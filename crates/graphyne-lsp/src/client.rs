@@ -143,9 +143,9 @@ impl LspClient {
                             let params = msg.get("params").cloned().unwrap_or(Value::Null);
                             let result = match method.as_str() {
                                 "workspace/configuration" => {
-                                    // Python servers ask for section "python": point them at the project's .venv.
+                                    // Python servers ask for section "python": point them at the project's interpreter.
                                     let items = params.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
-                                    let venv = graphyne_core::python_env::project_python(&root);
+                                    let venv = graphyne_core::python_env::interpreter(&root);
                                     Some(Value::Array(
                                         items
                                             .iter()

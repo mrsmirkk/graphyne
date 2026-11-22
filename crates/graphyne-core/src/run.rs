@@ -27,7 +27,7 @@ pub enum RunPlan {
     Unsupported { reason: String },
 }
 
-fn quote(shell: ShellKind, p: &Path) -> String {
+pub fn quote(shell: ShellKind, p: &Path) -> String {
     let s = p.to_string_lossy();
     match shell {
         ShellKind::PowerShell => format!("'{}'", s.replace('\'', "''")),
@@ -74,7 +74,7 @@ pub fn plan(file: &Path, project_root: &Path, shell: ShellKind) -> RunPlan {
         },
         LanguageId::C => pty(&name, dir, and_then(format!("gcc {f} -o {tmp_exe}"), tmp_exe.clone())),
         LanguageId::Cpp => pty(&name, dir, and_then(format!("g++ -std=c++20 {f} -o {tmp_exe}"), tmp_exe.clone())),
-        LanguageId::Python => match crate::python_env::project_python(project_root) {
+        LanguageId::Python => match crate::python_env::interpreter(project_root) {
             // The project's .venv (PowerShell needs `&` to run a quoted path).
             Some(venv) => {
                 let exe = quote(shell, &venv);
