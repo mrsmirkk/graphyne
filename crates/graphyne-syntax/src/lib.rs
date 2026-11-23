@@ -507,7 +507,8 @@ pub fn identifier_counts(tree: &Tree, rope: &Rope) -> HashMap<String, u32> {
     loop {
         let node = cursor.node();
         if !visited_children {
-            if node.child_count() == 0 && node.kind().ends_with("identifier") {
+            // PHP calls its identifiers `name`, Ruby its class names `constant`.
+            if node.child_count() == 0 && (node.kind().ends_with("identifier") || matches!(node.kind(), "name" | "constant")) {
                 *counts.entry(node_text(node, rope)).or_insert(0) += 1;
             }
             if cursor.goto_first_child() {

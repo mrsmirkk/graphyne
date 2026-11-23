@@ -44,6 +44,32 @@ fn need(program: &'static str, lang: LanguageId) -> Result<PathBuf, String> {
     })
 }
 
+/// PHP through Xdebug, which Graphyne talks to itself (`bridge::dbgp`): Graphyne runs as the
+/// debug adapter, the script runs in a terminal tab with Xdebug loaded for this session.
+fn php(file: &Path, dir: &Path, title: &str, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
+    let php = need("php", LanguageId::Php)?;
+    let info = crate::php::inspect(&php)?;
+    let mut php_args: Vec<String> = Vec::new();
+    if !info.xdebug {
+        let dll = crate::php::xdebug_for(&info, progress)?;
+        php_args.extend(["-d".into(), format!("zend_extension={}", dll.display())]);
+    }
+    for setting in ["xdebug.mode=debug", "xdebug.start_with_request=yes", "xdebug.client_host=127.0.0.1"] {
+        php_args.extend(["-d".into(), setting.into()]);
+    }
+    let me = std::env::current_exe().map_err(|e| format!("Graphyne's own path: {e}"))?;
+    Ok(Resolved {
+        name: "xdebug",
+        adapter_id: "php",
+        program: me,
+        args: vec![crate::bridge::ARG.into(), "php".into()],
+        env: Vec::new(),
+        transport: Transport::Stdio,
+        cwd: dir.to_path_buf(),
+        launch: json!({ "type": "php", "request": "launch", "name": format!("Graphyne: {title}"), "program": file, "cwd": dir, "php": php, "phpArgs": php_args }),
+    })
+}
+
 /// Ruby through its debug gem (rdbg; part of Ruby since 3.1). The program opens the DAP port
 /// itself (`-r debug/open`, waiting at its first line) in a terminal tab; Graphyne connects.
 fn ruby(file: &Path, dir: &Path, title: &str) -> Result<Resolved, String> {
@@ -124,6 +150,7 @@ pub fn resolve_with_progress(file: &Path, root: &Path, progress: &dyn Fn(&str)) 
         LanguageId::JavaScript | LanguageId::TypeScript => node(file, &dir, &title, lang),
         LanguageId::Lua => lua(file, &dir, &title, root, progress),
         LanguageId::Ruby => ruby(file, &dir, &title),
+        LanguageId::Php => php(file, &dir, &title, progress),
         other => Err(format!("No debugger configured for {} yet", other.name())),
     }
 }

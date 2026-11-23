@@ -49,6 +49,10 @@ pub fn run() {
     if graphyne_db::ssh::answer_askpass() {
         return;
     }
+    // A debug session started Graphyne as its adapter (PHP's Xdebug): serve it and leave.
+    if graphyne_dap::bridge::serve_if_asked() {
+        return;
+    }
     let started = std::time::Instant::now();
     let trace = std::env::var_os("GRAPHYNE_STARTUP_TRACE").is_some();
     let mark = move |stage: &str| {

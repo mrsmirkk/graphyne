@@ -34,6 +34,29 @@ fn hidden(program: &Path) -> Command {
     cmd
 }
 
+/// Download one file (no archive) to `dest`, checked against its SHA-256 first.
+pub fn fetch_file(url: &str, sha256: &str, dest: &Path) -> Result<(), String> {
+    let dir = dest.parent().ok_or("no folder")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let part = dest.with_extension("part");
+    let out = hidden(&system_tool("curl"))
+        .args(["-fsSL", "--retry", "2", "--connect-timeout", "15", "-o"])
+        .arg(&part)
+        .arg(url)
+        .output()
+        .map_err(|e| format!("curl: {e}"))?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&part);
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    let hash = sha256_hex(&part)?;
+    if hash != sha256 {
+        let _ = std::fs::remove_file(&part);
+        return Err(format!("the file's SHA-256 is {hash}, expected {sha256}"));
+    }
+    std::fs::rename(&part, dest).map_err(|e| format!("{}: {e}", dest.display()))
+}
+
 /// Download `url` into `dir`, check its SHA-256 and unpack it into `dir/unpacking` (emptied
 /// first). Returns that folder: the caller moves what it needs out of it and removes it.
 pub fn fetch_unpacked(url: &str, sha256: &str, dir: &Path) -> Result<PathBuf, String> {

@@ -9,7 +9,9 @@
 //! UI-agnostic: no GPUI types.
 
 pub mod adapters;
+pub mod bridge;
 pub mod client;
 pub mod model;
+pub mod php;
 
 pub use client::{DapClient, DapEvent, Transport};

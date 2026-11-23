@@ -13,6 +13,8 @@ parking_lot.workspace = true
 flume.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
+roxmltree = "0.20"
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

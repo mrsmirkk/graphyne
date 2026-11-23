@@ -2422,15 +2422,17 @@ fn editor_element(editor: Entity<Editor>) -> impl IntoElement {
                 // Inline debugger values ("name = value") for lines of the paused function.
                 let inline = match (exec_line, func_start) {
                     (Some(exec), Some(start)) if row >= start && row <= exec && !locals.is_empty() => {
+                        // PHP's locals are `$total`, the word in the line is `total`.
+                        let named = |n: &str, w: &str| n == w || n.strip_prefix('$') == Some(w);
                         let mut seen: Vec<&str> = Vec::new();
                         for word in text.split(|ch: char| !is_word_char(ch)).filter(|w| !w.is_empty()) {
-                            if !seen.contains(&word) && locals.iter().any(|(n, _)| n == word) {
+                            if !seen.contains(&word) && locals.iter().any(|(n, _)| named(n, word)) {
                                 seen.push(word);
                             }
                         }
                         let parts: Vec<String> = seen
                             .iter()
-                            .filter_map(|w| locals.iter().find(|(n, _)| n == w))
+                            .filter_map(|w| locals.iter().find(|(n, _)| named(n, w)))
                             .map(|(n, v)| {
                                 let v: String = if v.chars().count() > 40 { format!("{}…", v.chars().take(40).collect::<String>()) } else { v.clone() };
                                 format!("{n} = {v}")
