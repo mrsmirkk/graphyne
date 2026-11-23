@@ -134,6 +134,9 @@ single portable `.exe`.
   console. If `dlv` isn't installed, Graphyne builds it once with `go install` (the Go toolchain
   checks the download) into its own folder. The debug build goes to the temp folder, not
   `__debug_bin` in the project.
+- **Ruby** via Ruby's own debugger (the `debug` gem, part of Ruby since 3.1) — tested with Ruby 4.0:
+  breakpoints, stepping into methods, inline values, structs and hashes, and Ruby expressions in
+  the console (`items.keys`). The program runs in a terminal tab, so it can read input.
 - **Lua** via [lua-debug](https://github.com/actboy168/lua-debug) — tested with its Lua 5.4:
   breakpoints, stepping into functions, inline values, tables, upvalues and expressions
   (`total + i * 10`). Graphyne downloads lua-debug (about 10 MB, checked against a pinned SHA-256)

@@ -12,4 +12,4 @@ pub mod adapters;
 pub mod client;
 pub mod model;
 
-pub use client::{DapClient, DapEvent};
+pub use client::{DapClient, DapEvent, Transport};

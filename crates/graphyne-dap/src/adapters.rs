@@ -44,6 +44,34 @@ fn need(program: &'static str, lang: LanguageId) -> Result<PathBuf, String> {
     })
 }
 
+/// Ruby through its debug gem (rdbg; part of Ruby since 3.1). The program opens the DAP port
+/// itself (`-r debug/open`, waiting at its first line) in a terminal tab; Graphyne connects.
+fn ruby(file: &Path, dir: &Path, title: &str) -> Result<Resolved, String> {
+    let ruby = need("ruby", LanguageId::Ruby)?;
+    let has_debug = hidden_command(&ruby.to_string_lossy())
+        .args(["-e", "require 'debug/version'"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if !has_debug {
+        return Err("Ruby's debugger isn't installed: run `gem install debug` (it comes with Ruby 3.1 and newer)".into());
+    }
+    let port = free_port().ok_or("no free TCP port")?;
+    Ok(Resolved {
+        name: "rdbg",
+        adapter_id: "rdbg",
+        program: ruby,
+        args: vec!["-r".into(), "debug/open".into(), file.to_string_lossy().to_string()],
+        // ERROR: no "DEBUGGER: Connected." lines between the program's output.
+        env: vec![("RUBY_DEBUG_HOST".into(), "127.0.0.1".into()), ("RUBY_DEBUG_PORT".into(), port.to_string()), ("RUBY_DEBUG_LOG_LEVEL".into(), "ERROR".into())],
+        transport: Transport::Terminal { port },
+        cwd: dir.to_path_buf(),
+        launch: json!({ "type": "rdbg", "request": "launch", "name": format!("Graphyne: {title}"), "script": file, "cwd": dir, "localfs": true }),
+    })
+}
+
 /// Lua through lua-debug (downloaded on first use). The program runs on lua-debug's own Lua of
 /// the computer's Lua version (5.4 without one), in a terminal tab.
 fn lua(file: &Path, dir: &Path, title: &str, root: &Path, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
@@ -95,6 +123,7 @@ pub fn resolve_with_progress(file: &Path, root: &Path, progress: &dyn Fn(&str)) 
         LanguageId::Go => go(file, &dir, &title, progress),
         LanguageId::JavaScript | LanguageId::TypeScript => node(file, &dir, &title, lang),
         LanguageId::Lua => lua(file, &dir, &title, root, progress),
+        LanguageId::Ruby => ruby(file, &dir, &title),
         other => Err(format!("No debugger configured for {} yet", other.name())),
     }
 }

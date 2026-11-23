@@ -73,11 +73,12 @@ impl Render for DebugPanel {
             Status::Starting(m) => (m.clone(), c::YELLOW),
             Status::Running => ("Running".to_string(), c::GREEN),
             Status::Paused { reason, description } => (
-                // js-debug says "Paused on breakpoint" itself; debugpy only gives a reason.
+                // js-debug says "Paused on breakpoint" itself; debugpy only gives a reason; Ruby's
+                // rdbg describes the breakpoint at length ("BP - Line C:/…/main.rb:10").
                 match description {
                     Some(d) if d.to_lowercase().starts_with("paused") => d.clone(),
-                    Some(d) => format!("Paused: {d}"),
-                    None => format!("Paused: {reason}"),
+                    Some(d) if d.chars().count() <= 40 && !d.contains(['/', '\\']) => format!("Paused: {d}"),
+                    _ => format!("Paused: {reason}"),
                 },
                 c::YELLOW,
             ),
@@ -94,8 +95,9 @@ impl Render for DebugPanel {
 
         if console.len() != self.last_console_len {
             self.last_console_len = console.len();
+            // Each entry is drawn line by line, so the last entry isn't the last item.
             if !console.is_empty() {
-                self.console_scroll.scroll_to_item(console.len() - 1);
+                self.console_scroll.scroll_to_bottom();
             }
         }
 

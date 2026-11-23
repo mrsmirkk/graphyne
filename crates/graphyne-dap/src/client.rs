@@ -41,6 +41,9 @@ pub enum Transport {
     Stdio,
     /// The adapter listens on a TCP port (e.g. `dlv dap --listen=127.0.0.1:PORT`).
     Tcp { port: u16 },
+    /// The program serves DAP itself (Ruby's debug gem, a JVM): the UI runs `program args` in a
+    /// terminal tab, where it can read input, and the client connects to the port.
+    Terminal { port: u16 },
 }
 
 type Pending = Arc<Mutex<HashMap<i64, flume::Sender<Result<Value, String>>>>>;
@@ -146,8 +149,8 @@ fn parse_event(msg: &Value) -> Option<DapEvent> {
     })
 }
 
-fn connect_tcp(port: u16) -> Result<std::net::TcpStream> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+fn connect_tcp(port: u16, wait: Duration) -> Result<std::net::TcpStream> {
+    let deadline = Instant::now() + wait;
     loop {
         match std::net::TcpStream::connect(("127.0.0.1", port)) {
             Ok(s) => return Ok(s),
@@ -252,7 +255,7 @@ fn open_conn(shared: &Arc<Shared>, reader: Box<dyn Read + Send>, mut writer: Box
 /// Open the child session asked for by `startDebugging` (`arguments` of that request).
 fn start_child(shared: &Arc<Shared>, arguments: &Value) -> Result<()> {
     let port = shared.port.context("the adapter has no TCP port")?;
-    let stream = connect_tcp(port)?;
+    let stream = connect_tcp(port, Duration::from_secs(10))?;
     let conn = open_conn(shared, Box::new(stream.try_clone()?), Box::new(stream), true, None)?;
     // Route requests here first, so the UI's answer to this session's `initialized`
     // (breakpoints, `configurationDone`) arrives in it.
@@ -274,6 +277,11 @@ impl DapClient {
     /// Start the adapter. Blocking (process creation, TCP connect): call from a background
     /// executor.
     pub fn spawn(name: &str, program: &Path, args: &[String], env: &[(String, String)], cwd: &Path, transport: Transport) -> Result<Arc<Self>> {
+        if let Transport::Terminal { port } = transport {
+            // Started by the UI in a terminal tab; a JVM can take a while to listen.
+            let stream = connect_tcp(port, Duration::from_secs(30)).context("connecting to the program's debugger (see its terminal tab)")?;
+            return Self::start(name, Box::new(stream.try_clone()?), Box::new(stream), Some(port), None);
+        }
         let mut cmd = Command::new(program);
         cmd.args(args).current_dir(cwd).stderr(Stdio::piped());
         for (k, v) in env {
@@ -303,17 +311,21 @@ impl DapClient {
         }
 
         let port = match transport {
-            Transport::Tcp { port } => Some(port),
+            Transport::Tcp { port } | Transport::Terminal { port } => Some(port),
             Transport::Stdio => None,
         };
         let (reader, writer): (Box<dyn Read + Send>, Box<dyn Write + Send>) = match transport {
             Transport::Stdio => (Box::new(child.stdout.take().context("no stdout")?), Box::new(child.stdin.take().context("no stdin")?)),
-            Transport::Tcp { port } => {
-                let stream = connect_tcp(port)?;
+            Transport::Tcp { port } | Transport::Terminal { port } => {
+                let stream = connect_tcp(port, Duration::from_secs(10))?;
                 (Box::new(stream.try_clone()?), Box::new(stream))
             }
         };
+        Self::start(name, reader, writer, port, Some(child))
+    }
 
+    /// The session over an open connection (`child`: the adapter process, when Graphyne started one).
+    fn start(name: &str, reader: Box<dyn Read + Send>, writer: Box<dyn Write + Send>, port: Option<u16>, child: Option<std::process::Child>) -> Result<Arc<Self>> {
         let (ev_tx, ev_rx) = flume::unbounded::<DapEvent>();
         let shared = Arc::new(Shared {
             name: name.to_string(),
@@ -327,7 +339,7 @@ impl DapClient {
         let alive = Arc::new(AtomicBool::new(true));
         let base = open_conn(&shared, reader, writer, false, Some(alive.clone()))?;
 
-        Ok(Arc::new(Self { name: name.to_string(), base, shared, caps: RwLock::new(Value::Null), events: ev_rx, child: Mutex::new(Some(child)), alive }))
+        Ok(Arc::new(Self { name: name.to_string(), base, shared, caps: RwLock::new(Value::Null), events: ev_rx, child: Mutex::new(child), alive }))
     }
 
     pub fn events(&self) -> flume::Receiver<DapEvent> {

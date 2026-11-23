@@ -3,7 +3,7 @@
 
 use gpui::{AppContext, Context, EventEmitter, SharedString, Task};
 use graphyne_dap::model::{self, BreakpointSpec, Scope, StackFrame, Thread, Variable};
-use graphyne_dap::{DapClient, DapEvent, adapters};
+use graphyne_dap::{DapClient, DapEvent, Transport, adapters};
 use graphyne_lsp::convert::path_key;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -364,9 +364,24 @@ impl Debugger {
             }
         });
         let task = cx.spawn(async move |this, cx| {
+            let resolved = cx.background_spawn(async move { adapters::resolve_with_progress(&file, &root, &|text| drop(tx.send(text.to_string()))) }).await;
+            let r = match resolved {
+                Ok(r) => r,
+                Err(err) => {
+                    this.update(cx, |d, cx| d.fail(err, cx)).ok();
+                    return;
+                }
+            };
+            // The program serves DAP itself (Ruby, a JVM): it runs in a terminal tab first.
+            if matches!(r.transport, Transport::Terminal { .. }) {
+                let args: Vec<String> = std::iter::once(r.program.to_string_lossy().to_string()).chain(r.args.iter().cloned()).collect();
+                let (cwd, env) = (r.cwd.clone(), r.env.clone());
+                if this.update(cx, |d, cx| d.open_program_terminal(cwd, args, env, cx)).is_err() {
+                    return;
+                }
+            }
             let started = cx
                 .background_spawn(async move {
-                    let r = adapters::resolve_with_progress(&file, &root, &|text| drop(tx.send(text.to_string())))?;
                     let client = DapClient::spawn(r.name, &r.program, &r.args, &r.env, &r.cwd, r.transport.clone()).map_err(|e| format!("{e:#}"))?;
                     client.clone().initialize(r.adapter_id).await.map_err(|e| format!("initialize: {e:#}"))?;
                     Ok::<_, String>((client, r))
@@ -410,6 +425,15 @@ impl Debugger {
             s._tasks.push(progress);
             s._tasks.push(task);
         }
+    }
+
+    /// Run the debuggee in its own terminal tab, where it reads input.
+    fn open_program_terminal(&mut self, cwd: PathBuf, args: Vec<String>, env: Vec<(String, String)>, cx: &mut Context<Self>) {
+        let Some(s) = self.session.as_mut() else { return };
+        let tab = format!("Debug: {}", s.title);
+        s.console.push(("system".into(), format!("Program input / output: terminal tab \"{tab}\"\n")));
+        cx.emit(DebuggerEvent::RunInTerminal(tab, cwd, args, env));
+        cx.notify();
     }
 
     fn fail(&mut self, err: String, cx: &mut Context<Self>) {
