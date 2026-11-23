@@ -2090,18 +2090,28 @@ impl Workspace {
     fn run_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let lang = LanguageId::from_path(&path);
         let root = self.root.clone();
+        if let Some(note) = graphyne_core::run::prepare_note(lang) {
+            self.notify_user(note, false, cx);
+        }
         cx.spawn_in(window, async move |this, cx| {
             let file = path.clone();
-            let missing = cx.background_spawn(async move { graphyne_core::toolchain::missing_for_run(lang, &file, &root) }).await;
+            // What Graphyne brings itself (Lua) first, then what has to be installed.
+            let missing = cx.background_spawn(async move { graphyne_core::run::prepare(lang).map(|()| graphyne_core::toolchain::missing_for_run(lang, &file, &root)) }).await;
             this.update_in(cx, |this, window, cx| match missing {
-                Some(m) => {
+                Err(e) => {
+                    this.notify_user(format!("Run: {e}"), true, cx);
+                    this.show_notifications = true;
+                    this.unread = false;
+                    cx.notify();
+                }
+                Ok(Some(m)) => {
                     this.notify_user(m.message(lang), true, cx);
                     this.missing_tools.insert(lang, m);
                     this.show_notifications = true;
                     this.unread = false;
                     cx.notify();
                 }
-                None => {
+                Ok(None) => {
                     this.missing_tools.remove(&lang);
                     this.launch_run(path, window, cx);
                 }

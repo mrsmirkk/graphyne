@@ -228,6 +228,10 @@ fn describe(program: &'static str) -> Option<(&'static str, &'static str)> {
 /// What Run needs for `file` that isn't installed, if anything. Blocking (may start Python).
 pub fn missing_for_run(lang: LanguageId, file: &std::path::Path, root: &std::path::Path) -> Option<MissingTool> {
     let program = run_program(lang, file, root)?;
+    if program == "lua" {
+        // Without one on the computer, Run uses Graphyne's Lua.
+        return None;
+    }
     if program == "python" {
         // The project's .venv, or a real Python (not the Microsoft Store placeholder).
         if crate::python_env::interpreter(root).is_some() || crate::python_env::base_python().is_some() {

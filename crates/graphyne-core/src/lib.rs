@@ -18,6 +18,7 @@ pub mod fuzzy;
 pub mod language;
 pub mod libraries;
 pub mod live_server;
+pub mod lua;
 pub mod presets;
 pub mod process;
 pub mod project;

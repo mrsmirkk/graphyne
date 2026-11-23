@@ -105,7 +105,14 @@ pub fn plan(file: &Path, project_root: &Path, shell: ShellKind) -> RunPlan {
         }
         LanguageId::Php => pty(&name, dir, format!("php {f}")),
         LanguageId::Dart => pty(&name, dir, format!("dart run {f}")),
-        LanguageId::Lua => pty(&name, dir, format!("lua {f}")),
+        // The computer's Lua, else Graphyne's (see `prepare`).
+        LanguageId::Lua => match crate::lua::run_lua() {
+            Some(lua) => {
+                let exe = quote(shell, &lua);
+                pty(&name, dir, if shell == ShellKind::PowerShell { format!("& {exe} {f}") } else { format!("{exe} {f}") })
+            }
+            None => pty(&name, dir, format!("lua {f}")),
+        },
         LanguageId::Ruby => pty(&name, dir, format!("ruby {f}")),
         LanguageId::Scala => pty("scala-cli run .", dir, "scala-cli run .".into()),
         LanguageId::Swift => pty(&name, dir, format!("swift {f}")),
@@ -122,6 +129,25 @@ pub fn plan(file: &Path, project_root: &Path, shell: ShellKind) -> RunPlan {
             None => RunPlan::Unsupported { reason: format!("The {} extension has no run command", lang.name()) },
         },
         _ => RunPlan::Unsupported { reason: format!("No run configuration for {}", lang.name()) },
+    }
+}
+
+/// What Run fetches before it can run `lang` (Graphyne brings Lua itself): the note to show
+/// while it does, or `None` when nothing has to be downloaded.
+pub fn prepare_note(lang: LanguageId) -> Option<String> {
+    match lang {
+        LanguageId::Lua if crate::lua::run_lua().is_none() => {
+            Some(format!("No Lua on this computer: downloading Graphyne's Lua 5.4 (with the debugger lua-debug {}, about 10 MB, once)…", crate::lua::LUA_DEBUG_VERSION))
+        }
+        _ => None,
+    }
+}
+
+/// Fetch what Run needs for `lang` that Graphyne brings itself. Blocking.
+pub fn prepare(lang: LanguageId) -> Result<(), String> {
+    match lang {
+        LanguageId::Lua => crate::lua::prepare_run(&|_| {}).map(|_| ()),
+        _ => Ok(()),
     }
 }
 

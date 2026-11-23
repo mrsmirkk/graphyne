@@ -134,6 +134,12 @@ single portable `.exe`.
   console. If `dlv` isn't installed, Graphyne builds it once with `go install` (the Go toolchain
   checks the download) into its own folder. The debug build goes to the temp folder, not
   `__debug_bin` in the project.
+- **Lua** via [lua-debug](https://github.com/actboy168/lua-debug) — tested with its Lua 5.4:
+  breakpoints, stepping into functions, inline values, tables, upvalues and expressions
+  (`total + i * 10`). Graphyne downloads lua-debug (about 10 MB, checked against a pinned SHA-256)
+  on the first Lua debug session; it brings Lua 5.1–5.5 and LuaJIT, and the program runs on the
+  one that matches your Lua (5.4 without one). **No Lua installed?** Run uses Graphyne's Lua 5.4
+  from the same package.
 
 ### Python projects
 - When a Python file appears in a project (or on the first Run / Debug), Graphyne creates `.venv`

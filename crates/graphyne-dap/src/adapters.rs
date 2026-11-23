@@ -44,6 +44,36 @@ fn need(program: &'static str, lang: LanguageId) -> Result<PathBuf, String> {
     })
 }
 
+/// Lua through lua-debug (downloaded on first use). The program runs on lua-debug's own Lua of
+/// the computer's Lua version (5.4 without one), in a terminal tab.
+fn lua(file: &Path, dir: &Path, title: &str, root: &Path, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
+    use graphyne_core::lua;
+    let ext = lua::lua_debug(progress)?;
+    let runtime = lua::system_lua().and_then(|l| lua::runtime_of(&l)).unwrap_or("lua54");
+    let program = ext.join("bin").join(if cfg!(windows) { "lua-debug.exe" } else { "lua-debug" });
+    let d = dir.to_string_lossy().replace('\\', "/");
+    Ok(Resolved {
+        name: "lua-debug",
+        adapter_id: "lua",
+        program,
+        args: Vec::new(),
+        env: Vec::new(),
+        transport: Transport::Stdio,
+        cwd: dir.to_path_buf(),
+        // What lua-debug's VS Code extension fills in (configurationProvider.js).
+        launch: json!({
+            "type": "lua", "request": "launch", "name": format!("Graphyne: {title}"),
+            "program": file, "cwd": dir, "workspaceFolder": root,
+            "stopOnEntry": false, "stopOnThreadEntry": false,
+            "luaVersion": runtime, "luaArch": "x86_64",
+            "console": "integratedTerminal", "outputCapture": [],
+            "sourceCoding": if cfg!(windows) { "ansi" } else { "utf8" }, "pathFormat": "path",
+            "path": [format!("{d}/?.lua")], "cpath": [format!("{d}/?.{}", if cfg!(windows) { "dll" } else { "so" })],
+            "configuration": { "variables": { "showIntegerAsHex": false } },
+        }),
+    })
+}
+
 fn free_port() -> Option<u16> {
     std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?.local_addr().ok().map(|a| a.port())
 }
@@ -64,6 +94,7 @@ pub fn resolve_with_progress(file: &Path, root: &Path, progress: &dyn Fn(&str)) 
         LanguageId::C | LanguageId::Cpp => native(file, &dir, &title, lang, progress),
         LanguageId::Go => go(file, &dir, &title, progress),
         LanguageId::JavaScript | LanguageId::TypeScript => node(file, &dir, &title, lang),
+        LanguageId::Lua => lua(file, &dir, &title, root, progress),
         other => Err(format!("No debugger configured for {} yet", other.name())),
     }
 }

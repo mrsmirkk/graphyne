@@ -99,11 +99,18 @@ pub fn parse_scopes(body: &Value) -> Vec<Scope> {
         .unwrap_or_default()
 }
 
+/// The interpreter's own bookkeeping, not the program's variables: Lua's loop state
+/// (`(for state #1)`, `(for index)` in older versions) and temporaries.
+fn internal_variable(name: &str) -> bool {
+    name.starts_with("(for ") || matches!(name, "(temporary)" | "(*temporary)" | "(C temporary)")
+}
+
 pub fn parse_variables(body: &Value) -> Vec<Variable> {
     body["variables"]
         .as_array()
         .map(|a| {
             a.iter()
+                .filter(|v| !v["name"].as_str().is_some_and(internal_variable))
                 .filter_map(|v| {
                     Some(Variable {
                         name: v["name"].as_str()?.to_string(),
@@ -154,6 +161,18 @@ pub fn source_breakpoints<'a>(specs: impl IntoIterator<Item = &'a BreakpointSpec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lua_loop_state_is_hidden() {
+        let body = serde_json::json!({ "variables": [
+            { "name": "total", "value": "0", "variablesReference": 0 },
+            { "name": "(for state #1)", "value": "1", "variablesReference": 0 },
+            { "name": "(for index)", "value": "1", "variablesReference": 0 },
+            { "name": "i", "value": "1", "variablesReference": 0 },
+        ] });
+        let names: Vec<String> = parse_variables(&body).into_iter().map(|v| v.name).collect();
+        assert_eq!(names, ["total", "i"]);
+    }
     use serde_json::json;
 
     #[test]
