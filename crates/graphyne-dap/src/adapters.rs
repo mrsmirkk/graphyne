@@ -33,6 +33,17 @@ pub fn which(program: &str) -> Option<PathBuf> {
     dirs.into_iter().flat_map(|d| exts.iter().map(move |e| d.join(format!("{program}{e}")))).find(|c| c.is_file())
 }
 
+/// `program` (installed since Graphyne started counts too), or what to install to debug `lang`.
+fn need(program: &'static str, lang: LanguageId) -> Result<PathBuf, String> {
+    if let Some(p) = graphyne_core::toolchain::find(program) {
+        return Ok(p);
+    }
+    Err(match graphyne_core::toolchain::missing(program) {
+        Some(m) => m.debug_message(lang),
+        None => format!("{program} isn't installed, so {} can't be debugged", lang.name()),
+    })
+}
+
 fn free_port() -> Option<u16> {
     std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?.local_addr().ok().map(|a| a.port())
 }
@@ -48,11 +59,11 @@ pub fn resolve_with_progress(file: &Path, root: &Path, progress: &dyn Fn(&str)) 
     let dir = file.parent().unwrap_or(root).to_path_buf();
     let title = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     match lang {
-        LanguageId::Python => python(file, &dir, &title, root),
+        LanguageId::Python => python(file, &dir, &title, root, progress),
         LanguageId::Rust => rust(file, root, &title, progress),
         LanguageId::C | LanguageId::Cpp => native(file, &dir, &title, lang, progress),
         LanguageId::Go => go(file, &dir, &title, progress),
-        LanguageId::JavaScript | LanguageId::TypeScript => node(file, &dir, &title),
+        LanguageId::JavaScript | LanguageId::TypeScript => node(file, &dir, &title, lang),
         other => Err(format!("No debugger configured for {} yet", other.name())),
     }
 }
@@ -153,8 +164,8 @@ fn js_debug_server() -> Result<PathBuf, String> {
 /// Node.js through js-debug, which runs as a DAP server on a TCP port. The program runs in a
 /// terminal tab; js-debug attaches to it in a child session (`startDebugging`). TypeScript
 /// runs as is on Node ≥ 23.6 (types are stripped without moving code, so lines match).
-fn node(file: &Path, dir: &Path, title: &str) -> Result<Resolved, String> {
-    let node = which("node").ok_or("Node.js not found on PATH (install it from https://nodejs.org)")?;
+fn node(file: &Path, dir: &Path, title: &str, lang: LanguageId) -> Result<Resolved, String> {
+    let node = need("node", lang)?;
     let server = js_debug_server()?;
     let port = free_port().ok_or("no free TCP port")?;
     Ok(Resolved {
@@ -173,12 +184,13 @@ fn node(file: &Path, dir: &Path, title: &str) -> Result<Resolved, String> {
     })
 }
 
-fn python(file: &Path, dir: &Path, title: &str, root: &Path) -> Result<Resolved, String> {
-    // The project's interpreter (picked in the status bar, or its .venv with debugpy), then the system Python.
-    let python = graphyne_core::python_env::interpreter(root)
-        .or_else(|| which(if cfg!(windows) { "python" } else { "python3" }))
-        .or_else(|| which("python"))
-        .ok_or("Python interpreter not found on PATH")?;
+fn python(file: &Path, dir: &Path, title: &str, root: &Path, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
+    use graphyne_core::python_env::{self, Step};
+    // The project's interpreter (picked in the status bar, or its .venv), then the computer's
+    // Python (a real one, not the Microsoft Store placeholder).
+    let python = python_env::interpreter(root).or_else(python_env::base_python).ok_or_else(|| {
+        graphyne_core::toolchain::missing_for_run(LanguageId::Python, file, root).map(|m| m.debug_message(LanguageId::Python)).unwrap_or_else(|| "Python isn't installed".into())
+    })?;
     let mut env = Vec::new();
     // Explicit location (e.g. an isolated `pip install --target` folder) wins.
     if let Some(extra) = std::env::var_os("GRAPHYNE_DEBUGPY_PATH") {
@@ -198,7 +210,21 @@ fn python(file: &Path, dir: &Path, title: &str, root: &Path) -> Result<Resolved,
             .map(|s| s.success())
             .unwrap_or(false);
         if !ok {
-            return Err("debugpy is not installed for this Python. Install it with `python -m pip install debugpy` or set GRAPHYNE_DEBUGPY_PATH".into());
+            // Not in this environment (a system Python, conda, Poetry…): Graphyne's own copy,
+            // installed once per Python version; the environment itself stays as it is.
+            let step = |s: Step| {
+                progress(match s {
+                    Step::DownloadingUv => "Downloading uv (about 15 MB, once)…",
+                    _ => "Installing the Python debugger (debugpy, once for this Python version)…",
+                })
+            };
+            let own = python_env::private_debugpy(&python, &step)?;
+            let sep = if cfg!(windows) { ";" } else { ":" };
+            let mut pp = own.to_string_lossy().to_string();
+            if let Some(existing) = std::env::var_os("PYTHONPATH").filter(|p| !p.is_empty()) {
+                pp = format!("{pp}{sep}{}", existing.to_string_lossy());
+            }
+            env.push(("PYTHONPATH".to_string(), pp));
         }
     }
     Ok(Resolved {
@@ -261,6 +287,7 @@ fn cargo_build(crate_dir: &Path) -> Result<PathBuf, String> {
 
 fn rust(file: &Path, root: &Path, title: &str, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
     let crate_dir = graphyne_core::run::find_up(file, root, "Cargo.toml").ok_or("Cargo.toml not found for this file")?;
+    need("cargo", LanguageId::Rust)?;
     progress("Building with cargo…");
     let exe = cargo_build(&crate_dir)?;
     let (name, program, args, transport) = lldb_adapter(progress)?;
@@ -295,6 +322,7 @@ fn gdb_speaks_dap(gdb: &Path) -> bool {
 fn native(file: &Path, dir: &Path, title: &str, lang: LanguageId, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
     let exe = std::env::temp_dir().join(if cfg!(windows) { "graphyne-debug.exe" } else { "graphyne-debug" });
     let compiler = if lang == LanguageId::Cpp { "g++" } else { "gcc" };
+    need(compiler, lang)?;
     progress(&format!("Compiling with {compiler}…"));
     let out = hidden_command(compiler)
         .args(["-g", "-O0"])
@@ -339,7 +367,7 @@ fn delve(progress: &dyn Fn(&str)) -> Result<PathBuf, String> {
     if let Some(p) = which("dlv") {
         return Ok(p);
     }
-    let go = which("go").ok_or("Go isn't installed (go.dev/dl), so it can't be debugged")?;
+    let go = need("go", LanguageId::Go)?;
     let gopath = hidden_command(&go.to_string_lossy()).args(["env", "GOPATH"]).stdin(std::process::Stdio::null()).output().ok();
     if let Some(bin) = gopath.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|g| !g.is_empty()) {
         let p = Path::new(&bin).join("bin").join(exe_name);

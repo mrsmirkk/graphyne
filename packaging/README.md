@@ -25,8 +25,11 @@
   `rust-analyzer`, `pyright-langserver` (или `basedpyright`, `pylsp`), `gopls`, `clangd`,
   `vtsls` / `typescript-language-server`, `lua-language-server` и т.д. Без сервера работают
   подсветка синтаксиса и автодополнение по словам из файла.
-- **Python** — достаточно установленного Python 3: когда в проекте появляется `.py`-файл (или при
-  первом Run / Debug), Graphyne сам создаёт `.venv` и ставит туда `debugpy`; Run, Debug, pyright и
+- **Python** — если его нет на компьютере, Run / Debug предложат **Install Python 3.13** (через uv,
+  около 30 МБ, без записи в PATH и реестр). Когда в проекте появляется `.py`-файл (или при
+  первом Run / Debug), Graphyne сам создаёт `.venv` и ставит туда `debugpy`. Если выбран
+  интерпретатор без debugpy (системный Python, conda, Poetry…), отладчик берётся из папки
+  Graphyne, а в само окружение ничего не ставится; Run, Debug, pyright и
   встроенные терминалы используют этот `.venv` — `pip install` в терминале ставит пакет туда же,
   откуда его возьмёт Run. Пакеты проекта — из `requirements.txt`, а если его нет, из
   `dependencies` в `pyproject.toml` (вместе с группой `dev`, как делает uv) — Graphyne ставит в

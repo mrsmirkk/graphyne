@@ -45,7 +45,7 @@ single portable `.exe`.
 - **Real debugger** — breakpoints, conditions, logpoints, inline values, variables and an
   evaluation console over the Debug Adapter Protocol, for Python and JavaScript / TypeScript.
 - **Zero-setup Python** — create a `.py` file and Graphyne makes a `.venv` with `debugpy` in it,
-  so Run and Debug just work.
+  so Run and Debug just work. No Python on the computer? Graphyne offers to install one.
 - **Tells you what's missing** — no `g++`, no JDK, no Go? Graphyne says what to install instead of
   failing in the terminal.
 - **Git, the visual way** — branch graph, side-by-side diffs with word-level highlights, and
@@ -98,13 +98,21 @@ single portable `.exe`.
 - **Run presets** for auditing and reverse engineering: `cargo audit`, `clippy`, `nmap`,
   `gobuster`, `valgrind`, `strace`, `gdb` (only the installed ones are enabled).
 - **Missing toolchain detection**: if the compiler or runtime isn't installed, Graphyne says so —
-  with a link and a `winget` command — and shows "`g++` not found" in the status bar.
+  with a link and a `winget` command — and shows "`g++` not found" in the status bar. Once it is
+  installed, Run and Debug find it without restarting Graphyne (it reads PATH again).
 
 ### Debug
 - Debug Adapter Protocol client: **breakpoints, conditional breakpoints and logpoints** (remembered
   per project), step over / into / out, pause, restart, **inline variable values**, call stack,
   variables tree and an evaluation console. The program runs in a terminal tab, so it can read input.
-- **Python** via `debugpy` — fully supported and tested.
+- **Debuggers install themselves** on the first debug session (debugpy, js-debug, CodeLLDB,
+  Delve); the language itself must be installed — Node.js, Rust, `gcc` / `g++`, Go — and when it
+  isn't, Debug says what to get and where. Python is the exception: Graphyne installs it.
+- **Python** via `debugpy` — fully supported and tested. With an interpreter whose environment
+  has no debugpy (a system Python, conda, Poetry…), Graphyne uses its own copy, installed once
+  per Python version into its folder: nothing is installed into that environment. With no Python
+  on the computer, Run / Debug offer **Install Python 3.13** (with uv, about 30 MB, not on PATH
+  and not in the registry), then create `.venv` and carry on.
 - **JavaScript and TypeScript** on Node.js via Microsoft's `js-debug` — tested with Node 24.
   Graphyne downloads `js-debug` (about 1 MB, checked against a pinned SHA-256) on the first
   debug session; `.ts` files run as is on Node 23.6 or newer. Node's own frames are hidden from the

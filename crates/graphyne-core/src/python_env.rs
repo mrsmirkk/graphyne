@@ -395,11 +395,19 @@ fn path_key(p: &Path) -> String {
 /// Pythons this project could use: its virtual environments, the one picked before, the
 /// installations the `py` launcher knows (Windows), conda environments and `python` on PATH.
 /// Each is run once to learn its version, in parallel.
+/// `GRAPHYNE_HIDE_SYSTEM_PYTHON`: act as on a computer without Python (tests): only project
+/// environments and Pythons uv installed count.
+fn system_python_hidden() -> bool {
+    std::env::var_os("GRAPHYNE_HIDE_SYSTEM_PYTHON").is_some()
+}
+
 pub fn discover(root: &Path) -> Vec<Interpreter> {
     let mut jobs: Vec<Command> = Vec::new();
     let mut paths: Vec<PathBuf> = VENV_DIRS.iter().map(|d| venv_python(&root.join(d))).filter(|p| p.is_file()).collect();
     paths.extend(chosen(root).filter(|p| p.is_file()));
-    if cfg!(windows) {
+    if system_python_hidden() {
+        paths.extend(uv_pythons());
+    } else if cfg!(windows) {
         if let Ok(out) = command(Path::new("py")).arg("-0").output() {
             for tag in py_launcher_tags(&String::from_utf8_lossy(&out.stdout)) {
                 let mut cmd = command(Path::new("py"));
@@ -408,9 +416,11 @@ pub fn discover(root: &Path) -> Vec<Interpreter> {
             }
         }
     }
-    paths.extend(conda_envs());
-    paths.extend(on_path());
-    paths.extend(uv_pythons());
+    if !system_python_hidden() {
+        paths.extend(conda_envs());
+        paths.extend(on_path());
+        paths.extend(uv_pythons());
+    }
     jobs.extend(paths.iter().map(|p| command(p)));
     let found: Vec<Option<Interpreter>> = std::thread::scope(|s| {
         let handles: Vec<_> = jobs.into_iter().map(|cmd| s.spawn(move || probe(cmd))).collect();
@@ -456,15 +466,28 @@ pub(crate) fn command(program: &Path) -> Command {
 /// (it only prints how to install Python).
 pub fn base_python() -> Option<PathBuf> {
     let candidates: &[(&str, &[&str])] = if cfg!(windows) { &[("py", &["-3"]), ("python", &[]), ("python3", &[])] } else { &[("python3", &[]), ("python", &[])] };
-    candidates.iter().find_map(|(exe, pre)| {
-        let out = command(Path::new(exe))
-            .args(*pre)
-            .args(["-c", "import sys, venv; print(sys.executable) if sys.version_info >= (3, 8) else exit(1)"])
-            .output()
-            .ok()?;
-        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        (out.status.success() && !path.is_empty()).then(|| PathBuf::from(path)).filter(|p| p.is_file())
-    })
+    let on_path = || {
+        if system_python_hidden() {
+            return None;
+        }
+        candidates.iter().find_map(|(exe, pre)| {
+            let out = command(Path::new(exe))
+                .args(*pre)
+                .args(["-c", "import sys, venv; print(sys.executable) if sys.version_info >= (3, 8) else exit(1)"])
+                .output()
+                .ok()?;
+            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            (out.status.success() && !path.is_empty()).then(|| PathBuf::from(path)).filter(|p| p.is_file())
+        })
+    };
+    on_path()
+        .or_else(|| {
+            // Installed since Graphyne started?
+            crate::toolchain::refresh_path();
+            on_path()
+        })
+        // One uv installed ("Install Python" in Graphyne): not on PATH, by design.
+        .or_else(|| uv_pythons().into_iter().next())
 }
 
 pub fn has_module(python: &Path, module: &str) -> bool {
@@ -523,6 +546,8 @@ pub enum Outcome {
     Ready { python: PathBuf, created_venv: bool, installed_debugpy: bool, uv_note: Option<String> },
     /// Poetry / Pipenv / conda project — left to that tool.
     ManagedElsewhere(&'static str),
+    /// There is no Python on this computer to make the environment with.
+    NoPython,
 }
 
 /// Make sure `root` has a `.venv` with debugpy: create and install what is missing. An
@@ -539,15 +564,20 @@ pub fn ensure(root: &Path, progress: impl Fn(Step)) -> Result<Outcome, String> {
             return Ok(Outcome::ManagedElsewhere(tool));
         }
     }
+    // A Python to make the environment with, found before anything is downloaded.
+    let base = if existing.is_none() { base_python() } else { None };
+    if existing.is_none() && base.is_none() {
+        return Ok(Outcome::NoPython);
+    }
     // uv only when there is something to do (it may have to be downloaded).
     let (uv, uv_note) = if existing.is_none() || needs_debugpy { uv_for(root, &progress) } else { (None, None) };
-    let (python, created_venv) = match existing {
-        Some(python) => (python, false),
-        None => {
-            let base = base_python().ok_or("Python 3 is not installed. Get it from python.org (or `winget install Python.Python.3.13`), then run again.")?;
+    let (python, created_venv) = match (existing, base) {
+        (Some(python), _) => (python, false),
+        (None, Some(base)) => {
             progress(Step::CreatingVenv);
             (new_venv(root, &base, uv.as_deref())?, true)
         }
+        (None, None) => return Ok(Outcome::NoPython),
     };
     let mut installed_debugpy = false;
     if needs_debugpy {
@@ -562,6 +592,48 @@ pub fn ensure(root: &Path, progress: impl Fn(Step)) -> Result<Outcome, String> {
         installed_debugpy = true;
     }
     Ok(Outcome::Ready { python, created_venv, installed_debugpy, uv_note })
+}
+
+/// Graphyne's own debugpy for `python`, whose environment has none (a system Python, conda,
+/// Poetry…): nothing is installed into that environment. debugpy goes once per Python
+/// version into `<state>/tools/debugpy/<tag>`, and the debug session puts it on PYTHONPATH.
+pub fn private_debugpy(python: &Path, progress: &dyn Fn(Step)) -> Result<PathBuf, String> {
+    // The folder is per interpreter kind: debugpy's wheels are built per version and platform.
+    let script = "import sys, sysconfig; t = sys.implementation.cache_tag; print(t + ('t' if sysconfig.get_config_var('Py_GIL_DISABLED') else '') + '-' + sysconfig.get_platform())";
+    let out = command(python).args(["-c", script]).stdin(Stdio::null()).output().map_err(|e| format!("{}: {e}", python.display()))?;
+    let tag: String = String::from_utf8_lossy(&out.stdout).trim().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' }).collect();
+    if !out.status.success() || tag.is_empty() {
+        return Err(format!("{} doesn't run: {}", python.display(), error_line(&String::from_utf8_lossy(&out.stderr))));
+    }
+    let tools = crate::session::state_dir().ok_or("no folder for Graphyne's state")?.join("tools").join("debugpy");
+    let dir = tools.join(&tag);
+    if dir.join("debugpy").join("__init__.py").is_file() {
+        return Ok(dir);
+    }
+    progress(Step::InstallingDebugpy);
+    let staging = tools.join(format!("{tag}.partial"));
+    let fresh = || {
+        let _ = std::fs::remove_dir_all(&staging);
+    };
+    fresh();
+    let what = "installing debugpy";
+    // uv unless pip has a package source of its own (or uv is turned off).
+    let uv = (auto_installer().0 == Installer::Uv).then(|| get_uv(progress).ok()).flatten();
+    let by_uv = uv.as_ref().map(|uv| run(command(uv).args(["pip", "install", "--python"]).arg(python).arg("--target").arg(&staging).arg("debugpy"), what));
+    match by_uv {
+        Some(Ok(())) => {}
+        failed if has_module(python, "pip") => {
+            if failed.is_some() {
+                fresh();
+            }
+            run(install_command(None, python).arg("--target").arg(&staging).arg("debugpy"), what)?;
+        }
+        Some(Err(e)) => return Err(e),
+        None => return Err(format!("{what}: this Python has no pip, and uv is turned off in Settings")),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::rename(&staging, &dir).map_err(|e| format!("{what}: {e}"))?;
+    Ok(dir)
 }
 
 /// `.venv` in `root` from the installation `base`: with uv (a fraction of a second; `--seed`

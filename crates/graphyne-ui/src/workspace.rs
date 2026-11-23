@@ -177,6 +177,8 @@ pub struct Workspace {
     uv_here: bool,
     /// uv couldn't install the project's packages: offer pip (the error).
     pip_offer: Option<SharedString>,
+    /// No Python on this computer for Run / Debug: offer to install this version.
+    python_offer: Option<&'static str>,
     /// Packages changed in the project's environment: refresh the language server soon.
     packages_refresh: Option<gpui::Task<()>>,
     /// Languages of the project with a toolchain (External Libraries).
@@ -407,6 +409,7 @@ impl Workspace {
             auto_installer: graphyne_core::python_env::auto_installer(),
             uv_here: false,
             pip_offer: None,
+            python_offer: None,
             library_langs: Vec::new(),
             missing_tools: HashMap::new(),
             checked_tools: HashSet::new(),
@@ -830,6 +833,11 @@ impl Workspace {
         if !crate::app_settings::get(cx).python_auto_env {
             return true;
         }
+        if self.python_offer.is_some() {
+            // Waiting for "Install Python": the newest Run / Debug replaces the waiting one.
+            self.after_env.clear();
+            return false;
+        }
         match self.py_env {
             PyEnv::Ready | PyEnv::Skipped => true,
             PyEnv::Working(_) => false,
@@ -883,6 +891,7 @@ impl Workspace {
         match result {
             Ok(Outcome::Ready { created_venv, installed_debugpy, uv_note, .. }) => {
                 self.py_env = PyEnv::Ready;
+                self.missing_tools.remove(&LanguageId::Python);
                 if let Some(note) = uv_note {
                     self.notify_user(format!("Python: uv isn't available — {note}. pip was used instead."), false, cx);
                 }
@@ -908,6 +917,18 @@ impl Workspace {
                 self.py_env = PyEnv::Skipped;
                 self.requirements_snoozed = false;
                 self.check_requirements(cx);
+            }
+            Ok(Outcome::NoPython) => {
+                self.py_env = PyEnv::Failed;
+                // Graphyne can install one (with uv, unless uv is turned off): Run / Debug wait
+                // for the answer.
+                if graphyne_core::python_env::uv_enabled() || graphyne_core::python_env::find_uv().is_some() {
+                    self.python_offer = Some(graphyne_core::python_env::PYTHON_VERSIONS[0]);
+                    self.uv_here = graphyne_core::python_env::find_uv().is_some();
+                    cx.notify();
+                    return;
+                }
+                // Run / Debug below say what to install.
             }
             Err(e) => {
                 self.py_env = PyEnv::Failed;
@@ -1206,7 +1227,22 @@ impl Workspace {
             .child(section("PYTHON INTERPRETER"));
         match &self.interpreters {
             None => panel = panel.child(note("Looking for Python interpreters…")),
-            Some(list) if list.is_empty() => panel = panel.child(note("No Python found. Install it from python.org, then open this menu again.")),
+            Some(list) if list.is_empty() => {
+                panel = panel.child(note("No Python found on this computer."));
+                // Graphyne installs one with uv (unless uv is turned off in Settings).
+                if self.uv_here || graphyne_core::python_env::uv_enabled() {
+                    panel = panel.child(section("INSTALL PYTHON"));
+                    let size = if self.uv_here { "" } else { " (uv is downloaded first, about 15 MB)" };
+                    for (ix, version) in graphyne_core::python_env::PYTHON_VERSIONS.into_iter().enumerate() {
+                        panel = panel.child(
+                            row(("py-install", ix).into(), format!("Install Python {version}").into(), Some(format!("with uv, into its own folder — about 30 MB{size}").into()), false)
+                                .on_click(cx.listener(move |this, _, _, cx| this.install_python(version, cx))),
+                        );
+                    }
+                } else {
+                    panel = panel.child(note("Install it from python.org, or turn on uv in Settings to install it from here."));
+                }
+            }
             Some(list) => {
                 for (ix, i) in list.iter().enumerate() {
                     let path = i.path.clone();
@@ -1423,8 +1459,15 @@ impl Workspace {
             this.update(cx, |this, cx| {
                 this.pip_status = None;
                 match result {
+                    // Run / Debug was waiting for a Python: the project's .venv comes next.
+                    Ok(()) if !this.after_env.is_empty() => {
+                        this.notify_user(format!("Python {version} is installed."), false, cx);
+                        this.py_env = PyEnv::Unknown;
+                        this.start_python_env(cx);
+                    }
                     Ok(()) => this.notify_user(format!("Python {version} is installed. Pick it in the status bar, or create .venv with it."), false, cx),
                     Err(e) => {
+                        this.after_env.clear();
                         this.notify_user(format!("Python: {e}"), true, cx);
                         this.show_notifications = true;
                         this.unread = false;
@@ -1435,6 +1478,73 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// No Python on this computer (Run / Debug wait): offer to install one.
+    fn render_python_offer(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let version = self.python_offer?;
+        let button = |id: &'static str, label: SharedString, primary: bool| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .h(px(28.))
+                .px(px(12.))
+                .rounded(px(6.))
+                .border_1()
+                .cursor_pointer()
+                .text_size(px(theme::UI_SMALL))
+                .when(primary, |d| d.bg(color(c::ACCENT)).border_color(color(c::ACCENT)).text_color(color(0xFFFFFF)).hover(|s| s.bg(color_a(c::ACCENT, 0.85))))
+                .when(!primary, |d| d.border_color(color(c::POPUP_BORDER)).text_color(color(c::TEXT)).hover(|s| s.bg(color(c::HOVER))))
+                .child(label)
+        };
+        let size = if self.uv_here { "about 30 MB" } else { "about 30 MB, and uv first, about 15 MB" };
+        Some(
+            div()
+                .id("python-offer")
+                .occlude()
+                .absolute()
+                .right(px(16.))
+                .bottom(px(theme::STATUS_BAR_HEIGHT + 10.))
+                .w(px(420.))
+                .p(px(14.))
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .rounded(px(10.))
+                .bg(color(c::POPUP))
+                .border_1()
+                .border_color(color(c::POPUP_BORDER))
+                .shadow_lg()
+                .font_family(theme::fonts().ui)
+                .text_size(px(theme::UI_TEXT))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(icon(Icon::Warning, 14., color(c::YELLOW)))
+                        .child(div().text_color(color(c::TEXT)).font_weight(gpui::FontWeight::MEDIUM).child("Python isn't installed")),
+                )
+                .child(div().text_color(color(c::TEXT_MUTED)).child(format!(
+                    "Graphyne can install Python {version} ({size}) with uv, into uv's own folder: not on PATH and not in the registry. \
+                     Then it creates .venv for this project with the debugger in it, and runs your file."
+                )))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.))
+                        .child(button("python-offer-install", format!("Install Python {version}").into(), true).on_click(cx.listener(move |this, _, _, cx| {
+                            this.python_offer = None;
+                            this.install_python(version, cx);
+                        })))
+                        .child(button("python-offer-dismiss", "Not now".into(), false).on_click(cx.listener(|this, _, _, cx| {
+                            this.python_offer = None;
+                            this.after_env.clear();
+                            cx.notify();
+                        }))),
+                ),
+        )
     }
 
     /// uv failed to install the project's packages: offer pip for this project.
@@ -2584,7 +2694,12 @@ impl Workspace {
                                 .child(icon(Icon::Warning, 12., color(c::YELLOW)))
                                 .child(format!("{} not found", m.program))
                                 .tooltip(tooltip(hint, None))
-                                .on_click(cx.listener(|this, _, _, cx| {
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if lang == LanguageId::Python {
+                                        // Install Python is in that menu.
+                                        this.toggle_menu(Menu::Python, cx);
+                                        return;
+                                    }
                                     this.show_notifications = true;
                                     this.unread = false;
                                     cx.notify();
@@ -3156,6 +3271,7 @@ impl Render for Workspace {
         let notifications = self.render_notifications(cx);
         let requirements_ask = self.render_requirements_ask(cx);
         let pip_offer = self.render_pip_offer(cx);
+        let python_offer = self.render_python_offer(cx);
         let menu = self.render_menu(cx);
 
         let center = div()
@@ -3247,6 +3363,7 @@ impl Render for Workspace {
             .children(search_overlay)
             .children(requirements_ask)
             .children(pip_offer)
+            .children(python_offer)
             .children(notifications)
             .children(menu)
             .children(self.render_python_menu(cx))

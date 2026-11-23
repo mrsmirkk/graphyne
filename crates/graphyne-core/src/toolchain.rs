@@ -55,6 +55,87 @@ pub fn which(program: &str) -> Option<std::path::PathBuf> {
     dirs.iter().flat_map(|d| exts.iter().map(move |e| d.join(format!("{program}{e}")))).find(|p| p.is_file())
 }
 
+/// `program` on PATH; when it isn't there, PATH is read again from the registry first: a
+/// program installed after Graphyne started is found without a restart.
+pub fn find(program: &str) -> Option<std::path::PathBuf> {
+    which(program).or_else(|| {
+        refresh_path();
+        which(program)
+    })
+}
+
+/// Add to Graphyne's own PATH the folders the system's PATH has gained since Graphyne
+/// started (an installer added them). Windows only; `GRAPHYNE_KEEP_PATH` turns it off (tests
+/// with a PATH that lacks some tools).
+pub fn refresh_path() {
+    #[cfg(windows)]
+    {
+        if std::env::var_os("GRAPHYNE_KEEP_PATH").is_some() {
+            return;
+        }
+        let current: Vec<std::path::PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+        let key = |p: &std::path::Path| p.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase();
+        let known: std::collections::HashSet<String> = current.iter().map(|p| key(p)).collect();
+        let mut added: Vec<std::path::PathBuf> = Vec::new();
+        for dir in registry_path() {
+            if !known.contains(&key(&dir)) && !added.iter().any(|a| key(a) == key(&dir)) {
+                added.push(dir);
+            }
+        }
+        if added.is_empty() {
+            return;
+        }
+        log::info!("PATH gained {} folder(s) since start: {:?}", added.len(), added);
+        if let Ok(path) = std::env::join_paths(current.into_iter().chain(added)) {
+            // SAFETY: Windows guards its environment block itself, and Graphyne's own code
+            // reads it through std, which takes the same lock.
+            unsafe { std::env::set_var("PATH", path) };
+        }
+    }
+}
+
+/// The system's PATH as the registry has it now: the machine's, then the user's, expanded.
+#[cfg(windows)]
+fn registry_path() -> Vec<std::path::PathBuf> {
+    use windows_sys::Win32::System::Environment::ExpandEnvironmentStringsW;
+    use windows_sys::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW};
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(Some(0)).collect()
+    }
+    fn read(root: HKEY, key: &str) -> Option<String> {
+        let (key, name) = (wide(key), wide("Path"));
+        let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
+        let mut size = 0u32;
+        // SAFETY: plain Win32 calls with buffers sized as the API asks.
+        unsafe {
+            if RegGetValueW(root, key.as_ptr(), name.as_ptr(), flags, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) != 0 {
+                return None;
+            }
+            let mut raw = vec![0u16; (size as usize).div_ceil(2) + 1];
+            let mut size = (raw.len() * 2) as u32;
+            if RegGetValueW(root, key.as_ptr(), name.as_ptr(), flags, std::ptr::null_mut(), raw.as_mut_ptr().cast(), &mut size) != 0 {
+                return None;
+            }
+            let end = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
+            raw.truncate(end);
+            raw.push(0);
+            let needed = ExpandEnvironmentStringsW(raw.as_ptr(), std::ptr::null_mut(), 0);
+            if needed == 0 {
+                return Some(String::from_utf16_lossy(&raw[..end]));
+            }
+            let mut out = vec![0u16; needed as usize];
+            let written = ExpandEnvironmentStringsW(raw.as_ptr(), out.as_mut_ptr(), needed) as usize;
+            Some(String::from_utf16_lossy(&out[..written.saturating_sub(1).min(out.len())]))
+        }
+    }
+    [read(HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"), read(HKEY_CURRENT_USER, "Environment")]
+        .into_iter()
+        .flatten()
+        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect()
+}
+
 /// A compiler / runtime that Run needs but this computer doesn't have.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MissingTool {
@@ -67,9 +148,25 @@ pub struct MissingTool {
 }
 
 impl MissingTool {
+    /// For Run. (Graphyne looks again once it's installed: no restart needed.)
     pub fn message(&self, lang: LanguageId) -> String {
-        format!("{} isn't installed, so {} files can't run. {} Then restart Graphyne.", capitalize(self.what), lang.name(), self.hint)
+        format!("{} isn't installed, so {} files can't run. {}", capitalize(self.what), lang.name(), self.hint)
     }
+
+    /// For Debug.
+    pub fn debug_message(&self, lang: LanguageId) -> String {
+        format!("{} isn't installed, so {} can't be debugged. {}", capitalize(self.what), lang.name(), self.hint)
+    }
+}
+
+/// `program` (one of those Run and Debug use) when it isn't installed: what it is and where
+/// to get it.
+pub fn missing(program: &'static str) -> Option<MissingTool> {
+    if find(program).is_some() {
+        return None;
+    }
+    let (what, hint) = describe(program)?;
+    Some(MissingTool { program, what, hint })
 }
 
 fn capitalize(s: &str) -> String {
@@ -110,7 +207,7 @@ fn describe(program: &'static str) -> Option<(&'static str, &'static str)> {
         "cargo" | "rustc" => ("Rust (rustc and cargo)", "Install it with rustup: https://rustup.rs (on Windows: winget install Rustlang.Rustup)."),
         "gcc" => ("a C compiler (gcc)", "Install MinGW-w64 (winget install BrechtSanders.WinLibs.POSIX.UCRT, or MSYS2 from msys2.org) and add its bin folder to PATH."),
         "g++" => ("a C++ compiler (g++)", "Install MinGW-w64 (winget install BrechtSanders.WinLibs.POSIX.UCRT, or MSYS2 from msys2.org) and add its bin folder to PATH."),
-        "python" => ("Python 3", "Get it from python.org (on Windows: winget install Python.Python.3.13)."),
+        "python" => ("Python 3", "Install it from the Python menu in the status bar (Install Python), or from python.org."),
         "go" => ("Go", "Get it from go.dev/dl (on Windows: winget install GoLang.Go)."),
         "bun" => ("Bun (runs TypeScript)", "Get it from bun.sh (on Windows: winget install Oven-sh.Bun)."),
         "node" => ("Node.js", "Get it from nodejs.org (on Windows: winget install OpenJS.NodeJS.LTS)."),
@@ -131,16 +228,15 @@ fn describe(program: &'static str) -> Option<(&'static str, &'static str)> {
 /// What Run needs for `file` that isn't installed, if anything. Blocking (may start Python).
 pub fn missing_for_run(lang: LanguageId, file: &std::path::Path, root: &std::path::Path) -> Option<MissingTool> {
     let program = run_program(lang, file, root)?;
-    let installed = match program {
+    if program == "python" {
         // The project's .venv, or a real Python (not the Microsoft Store placeholder).
-        "python" => crate::python_env::interpreter(root).is_some() || crate::python_env::base_python().is_some(),
-        _ => which(program).is_some(),
-    };
-    if installed {
-        return None;
+        if crate::python_env::interpreter(root).is_some() || crate::python_env::base_python().is_some() {
+            return None;
+        }
+        let (what, hint) = describe(program)?;
+        return Some(MissingTool { program, what, hint });
     }
-    let (what, hint) = describe(program)?;
-    Some(MissingTool { program, what, hint })
+    missing(program)
 }
 
 #[cfg(test)]
@@ -159,6 +255,10 @@ mod tests {
             assert!(describe(program).is_some(), "{program}");
         }
         let missing = MissingTool { program: "g++", what: "a C++ compiler (g++)", hint: "Install it." };
-        assert_eq!(missing.message(LanguageId::Cpp), "A C++ compiler (g++) isn't installed, so C++ files can't run. Install it. Then restart Graphyne.");
+        assert_eq!(missing.message(LanguageId::Cpp), "A C++ compiler (g++) isn't installed, so C++ files can't run. Install it.");
+        assert_eq!(missing.debug_message(LanguageId::Cpp), "A C++ compiler (g++) isn't installed, so C++ can't be debugged. Install it.");
+        // Graphyne's own PATH holds at least what the system's PATH had at start.
+        #[cfg(windows)]
+        assert!(registry_path().iter().any(|d| d.join("cmd.exe").is_file()), "System32 is on the registry's PATH");
     }
 }
