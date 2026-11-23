@@ -1,4 +1,4 @@
-# Graphyne 0.1.0-alpha.9 — Windows x64
+# Graphyne 0.1.0-alpha.10 — Windows x64
 
 Ранняя альфа-версия IDE на Rust + GPUI в стиле JetBrains Fleet. Сборка для ознакомления:
 часть функций из ТЗ ещё не реализована (см. «Ограничения»).
