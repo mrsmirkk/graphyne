@@ -49,7 +49,13 @@ fn pg_err(e: postgres::Error) -> String {
 
 pub(crate) fn open(cfg: &ServerConfig, password: Option<String>) -> Result<(Pg, Interrupter), String> {
     let mut config = postgres::Config::new();
-    config.host(if cfg.host.is_empty() { "localhost" } else { cfg.host.as_str() }).port(cfg.port).application_name("Graphyne").connect_timeout(Duration::from_secs(10));
+    // Through an SSH tunnel: connect to its local end; the certificate is still checked
+    // against the server's own name. (`port` adds a port per call: set it once.)
+    let port = cfg.via.map_or(cfg.port, |v| v.port());
+    config.host(if cfg.host.is_empty() { "localhost" } else { cfg.host.as_str() }).port(port).application_name("Graphyne").connect_timeout(Duration::from_secs(10));
+    if let Some(via) = cfg.via {
+        config.hostaddr(via.ip());
+    }
     if !cfg.user.is_empty() {
         config.user(cfg.user.as_str());
     }

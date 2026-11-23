@@ -32,6 +32,8 @@ pub struct TextInput {
     is_selecting: bool,
     /// A password field: shows dots, never copies its text.
     masked: bool,
+    /// How far text longer than the field is scrolled left (the cursor stays in view).
+    scroll_x: Pixels,
 }
 
 /// What a password field shows for each character.
@@ -58,6 +60,7 @@ impl TextInput {
             last_bounds: None,
             is_selecting: false,
             masked: false,
+            scroll_x: px(0.),
         }
     }
 
@@ -231,7 +234,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        self.from_display(line.closest_index_for_x(position.x - bounds.left()))
+        self.from_display(line.closest_index_for_x(position.x - bounds.left() + self.scroll_x))
     }
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         if self.selection_reversed {
@@ -364,16 +367,17 @@ impl EntityInputHandler for TextInput {
     fn bounds_for_range(&mut self, range_utf16: Range<usize>, bounds: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
         let layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
+        let left = bounds.left() - self.scroll_x;
         Some(Bounds::from_corners(
-            point(bounds.left() + layout.x_for_index(self.to_display(range.start)), bounds.top()),
-            point(bounds.left() + layout.x_for_index(self.to_display(range.end)), bounds.bottom()),
+            point(left + layout.x_for_index(self.to_display(range.start)), bounds.top()),
+            point(left + layout.x_for_index(self.to_display(range.end)), bounds.bottom()),
         ))
     }
 
     fn character_index_for_point(&mut self, p: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
         let bounds = self.last_bounds?;
         let layout = self.last_layout.as_ref()?;
-        let ix = self.from_display(layout.closest_index_for_x(p.x - bounds.left()));
+        let ix = self.from_display(layout.closest_index_for_x(p.x - bounds.left() + self.scroll_x));
         Some(self.offset_to_utf16(ix))
     }
 }
@@ -420,32 +424,46 @@ fn text_element(input: Entity<TextInput>) -> impl IntoElement {
             let cursor = this.to_display(this.cursor_offset());
             let sel = this.to_display(this.selected_range.start)..this.to_display(this.selected_range.end);
             let empty = this.content.is_empty();
-            (line, focused, cursor, sel, empty, bounds)
+            // Text longer than the field scrolls so that the cursor stays in view (with room
+            // for the caret at the end), and never leaves blank space after the text.
+            let scroll = if empty {
+                px(0.)
+            } else {
+                let room = bounds.size.width - px(2.);
+                let x = line.x_for_index(cursor);
+                let mut scroll = this.scroll_x;
+                if x - scroll > room {
+                    scroll = x - room;
+                }
+                if x < scroll {
+                    scroll = x;
+                }
+                scroll.min((line.width - room).max(px(0.))).max(px(0.))
+            };
+            (line, focused, cursor, sel, empty, scroll)
         },
-        move |bounds, (line, focused, cursor, sel, empty, _), window, cx| {
+        move |bounds, (line, focused, cursor, sel, empty, scroll), window, cx| {
             let focus_handle = input.read(cx).focus_handle.clone();
             window.handle_input(&focus_handle, ElementInputHandler::new(bounds, input.clone()), cx);
             let line_height = bounds.size.height;
-            if !sel.is_empty() && !empty {
-                window.paint_quad(fill(
-                    Bounds::from_corners(
-                        point(bounds.left() + line.x_for_index(sel.start), bounds.top()),
-                        point(bounds.left() + line.x_for_index(sel.end), bounds.bottom()),
-                    ),
-                    color(c::SELECTION),
-                ));
-            }
-            let _ = line.paint(bounds.origin, line_height, window, cx);
-            if focused {
-                let x = if empty { px(0.) } else { line.x_for_index(cursor) };
-                window.paint_quad(fill(
-                    Bounds::new(point(bounds.left() + x, bounds.top() + px(3.)), size(px(1.5), line_height - px(6.))),
-                    color(c::CURSOR),
-                ));
-            }
+            let left = bounds.left() - scroll;
+            window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+                if !sel.is_empty() && !empty {
+                    window.paint_quad(fill(
+                        Bounds::from_corners(point(left + line.x_for_index(sel.start), bounds.top()), point(left + line.x_for_index(sel.end), bounds.bottom())),
+                        color(c::SELECTION),
+                    ));
+                }
+                let _ = line.paint(point(left, bounds.top()), line_height, window, cx);
+                if focused {
+                    let x = if empty { px(0.) } else { line.x_for_index(cursor) };
+                    window.paint_quad(fill(Bounds::new(point(left + x, bounds.top() + px(3.)), size(px(1.5), line_height - px(6.))), color(c::CURSOR)));
+                }
+            });
             input.update(cx, |input, _| {
                 input.last_layout = Some(line);
                 input.last_bounds = Some(bounds);
+                input.scroll_x = scroll;
             });
         },
     )

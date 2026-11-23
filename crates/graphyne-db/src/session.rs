@@ -17,25 +17,50 @@ impl DbSession {
     /// Connect (blocking until the connection is open or has failed), with the password
     /// saved for it. The thread ends when the session is dropped.
     pub fn open(config: &DbConfig) -> Result<DbSession, String> {
-        let password = match config.kind.server().and_then(|s| s.secret.as_deref()) {
-            Some(key) => crate::secrets::get_password(key)?,
-            None => None,
+        let saved = |key: Option<&str>| -> Result<Option<String>, String> {
+            match key {
+                Some(key) => crate::secrets::get_password(key),
+                None => Ok(None),
+            }
         };
-        Self::open_with(config, password)
+        let server = config.kind.server();
+        let password = saved(server.and_then(|s| s.secret.as_deref()))?;
+        let ssh_secret = saved(server.and_then(|s| s.ssh.as_ref()).and_then(|t| t.secret.as_deref()))?;
+        Self::open_with(config, password, ssh_secret)
     }
 
-    /// Connect with this `password` (the connection form's Test, before anything is saved).
-    pub fn open_with(config: &DbConfig, password: Option<String>) -> Result<DbSession, String> {
+    /// Connect with this `password` and SSH password / passphrase (the connection form's Test,
+    /// before anything is saved).
+    pub fn open_with(config: &DbConfig, password: Option<String>, ssh_secret: Option<String>) -> Result<DbSession, String> {
         let (jobs, queue) = flume::unbounded::<Job>();
         let (ready_tx, ready) = flume::bounded(1);
         let kind = config.kind.clone();
         std::thread::Builder::new()
             .name(format!("db: {}", config.name))
             .spawn(move || {
+                // Through SSH: the driver connects to the tunnel's local end, which lives as long
+                // as this thread (the session).
+                let mut _tunnel = None;
+                let through = |server: &crate::ServerConfig, tunnel: &mut Option<crate::ssh::Tunnel>| -> Result<crate::ServerConfig, String> {
+                    let Some(ssh) = &server.ssh else { return Ok(server.clone()) };
+                    let t = crate::ssh::open(ssh, &server.host, server.port, ssh_secret.as_deref())?;
+                    let local = crate::ServerConfig { ssh: None, via: Some(std::net::SocketAddr::from(([127, 0, 0, 1], t.port))), ..server.clone() };
+                    *tunnel = Some(t);
+                    Ok(local)
+                };
+                // The driver only sees the tunnel close; ssh knows why.
+                let why = |tunnel: &Option<crate::ssh::Tunnel>, e: String| match tunnel {
+                    Some(t) => t.explain(e),
+                    None => e,
+                };
                 let opened = match &kind {
                     DbKind::Sqlite { path } => crate::sqlite::open(path).map(|(d, i)| (Box::new(d) as Box<dyn Driver>, i)),
-                    DbKind::Postgres(server) => crate::pg::open(server, password).map(|(d, i)| (Box::new(d) as Box<dyn Driver>, i)),
-                    DbKind::Mysql(server) => crate::mysql_driver::open(server, password).map(|(d, i)| (Box::new(d) as Box<dyn Driver>, i)),
+                    DbKind::Postgres(server) => through(server, &mut _tunnel)
+                        .and_then(|s| crate::pg::open(&s, password).map_err(|e| why(&_tunnel, e)))
+                        .map(|(d, i)| (Box::new(d) as Box<dyn Driver>, i)),
+                    DbKind::Mysql(server) => through(server, &mut _tunnel)
+                        .and_then(|s| crate::mysql_driver::open(&s, password).map_err(|e| why(&_tunnel, e)))
+                        .map(|(d, i)| (Box::new(d) as Box<dyn Driver>, i)),
                 };
                 match opened {
                     Err(e) => drop(ready_tx.send(Err(e))),
@@ -150,6 +175,28 @@ mod tests {
         Some((DbConfig::server("test", kind, &[]), password.to_string()))
     }
 
+    /// Through an SSH tunnel: `GRAPHYNE_TEST_SSH` = `host:port:key file` (a key without a
+    /// passphrase: the test binary can't answer ssh's prompt), with `GRAPHYNE_TEST_PG` /
+    /// `GRAPHYNE_TEST_MYSQL` as the SSH host sees the database.
+    #[test]
+    fn through_ssh() {
+        let Ok(spec) = std::env::var("GRAPHYNE_TEST_SSH") else { return };
+        let mut parts = spec.splitn(3, ':');
+        let (Some(host), Some(Ok(port)), Some(key)) = (parts.next(), parts.next().map(str::parse), parts.next()) else { panic!("GRAPHYNE_TEST_SSH = host:port:key") };
+        let tunnel = crate::SshConfig { host: host.into(), port, key_file: Some(key.into()), ..Default::default() };
+        for (var, mysql) in [("GRAPHYNE_TEST_PG", false), ("GRAPHYNE_TEST_MYSQL", true)] {
+            let Some((mut config, password)) = server(var, mysql) else { continue };
+            if let DbKind::Postgres(s) | DbKind::Mysql(s) = &mut config.kind {
+                s.ssh = Some(tunnel.clone());
+            }
+            let db = DbSession::open_with(&config, Some(password), None).unwrap();
+            let version = db.version().recv().unwrap().unwrap();
+            assert!(version.starts_with("PostgreSQL ") || version.starts_with("MariaDB ") || version.starts_with("MySQL "), "{version}");
+            let outcomes = db.run_script("SELECT 41 + 1".into(), 10).recv().unwrap();
+            assert_eq!(rows(&outcomes[0]).rows[0][0].to_text(), "42");
+        }
+    }
+
     fn rows(outcome: &QueryOutcome) -> &ResultSet {
         match &outcome.result {
             Ok(StatementResult::Rows(r)) => r,
@@ -160,7 +207,7 @@ mod tests {
     #[test]
     fn postgres_server() {
         let Some((config, password)) = server("GRAPHYNE_TEST_PG", false) else { return };
-        let db = DbSession::open_with(&config, Some(password)).unwrap();
+        let db = DbSession::open_with(&config, Some(password), None).unwrap();
         assert!(db.version().recv().unwrap().unwrap().starts_with("PostgreSQL "));
         let script = "DROP SCHEMA IF EXISTS graphyne_test CASCADE;
             CREATE SCHEMA graphyne_test;
@@ -200,7 +247,7 @@ mod tests {
     #[test]
     fn mysql_server() {
         let Some((config, password)) = server("GRAPHYNE_TEST_MYSQL", true) else { return };
-        let db = DbSession::open_with(&config, Some(password)).unwrap();
+        let db = DbSession::open_with(&config, Some(password), None).unwrap();
         let version = db.version().recv().unwrap().unwrap();
         assert!(version.starts_with("MariaDB ") || version.starts_with("MySQL "), "{version}");
         let script = "DROP DATABASE IF EXISTS graphyne_test;

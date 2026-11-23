@@ -249,36 +249,6 @@ fn open_conn(shared: &Arc<Shared>, reader: Box<dyn Read + Send>, mut writer: Box
     Ok(conn)
 }
 
-/// Put an adapter process in a job that Windows closes when Graphyne exits, however it exits:
-/// adapters that serve over TCP (js-debug) would otherwise keep running.
-#[cfg(windows)]
-fn end_with_graphyne(child: &Child) {
-    use std::os::windows::io::AsRawHandle;
-    use std::sync::OnceLock;
-    use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-        SetInformationJobObject,
-    };
-    static JOB: OnceLock<usize> = OnceLock::new();
-    // The handle stays open for the life of Graphyne; closing it (at exit) ends the processes.
-    let job = *JOB.get_or_init(|| unsafe {
-        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if job.is_null() {
-            return 0;
-        }
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        let size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
-        if SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info as *const _ as *const std::ffi::c_void, size) == 0 {
-            return 0;
-        }
-        job as usize
-    });
-    if job != 0 && unsafe { AssignProcessToJobObject(job as _, child.as_raw_handle() as _) } == 0 {
-        log::warn!("could not tie the debug adapter to Graphyne's lifetime");
-    }
-}
-
 /// Open the child session asked for by `startDebugging` (`arguments` of that request).
 fn start_child(shared: &Arc<Shared>, arguments: &Value) -> Result<()> {
     let port = shared.port.context("the adapter has no TCP port")?;
@@ -321,7 +291,7 @@ impl DapClient {
         }
         let mut child = cmd.spawn().with_context(|| format!("starting debug adapter {}", program.display()))?;
         #[cfg(windows)]
-        end_with_graphyne(&child);
+        graphyne_core::process::end_with_graphyne(&child);
 
         let label = name.to_string();
         if let Some(stderr) = child.stderr.take() {

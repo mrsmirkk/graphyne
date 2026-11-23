@@ -51,8 +51,8 @@ single portable `.exe`.
 - **Git, the visual way** — branch graph, side-by-side diffs with word-level highlights, and
   commits of selected changes only.
 - **Databases built in** — SQLite, PostgreSQL and MySQL / MariaDB: a schema browser, an SQL
-  console, a fast data grid with editing, export and CSV import; passwords stay in the Windows
-  Credential Manager.
+  console, a fast data grid with editing, export and CSV import, SSH tunnels; passwords stay in
+  the Windows Credential Manager.
 - **Picks up where you left off** — open tabs, cursors, scroll positions, folded code, panels and
   window placement come back on the next launch.
 - **Extensible with LuaJIT** — themes, new languages (with tree-sitter highlighting), shortcuts
@@ -187,6 +187,11 @@ single portable `.exe`.
   mode, Test Connection; tables of other schemas shown as `schema.table`) and **SQLite**, which is
   built in — opening a `.db` / `.sqlite` file from the project tree adds it.
 - **Passwords are kept in the Windows Credential Manager**, never in Graphyne's files.
+- **SSH tunnels**: a PostgreSQL or MySQL connection can go through an SSH host (SSH tunnel → On:
+  host, port, user, key file, password or the key's passphrase). Graphyne uses Windows' own
+  OpenSSH client, so `~/.ssh/config`, your keys and ssh-agent work as in a terminal. New host keys
+  are remembered in `~/.ssh/known_hosts`; a changed one stops the connection. The tunnel closes
+  with the connection.
 - **SQL console** per connection: Run (the ▷ in the title bar) or `Ctrl+Enter` runs the statement
   under the cursor or the selection (scripts too), **Stop** cancels a long query, errors show with the failing statement.
   The console text is kept between sessions.
@@ -250,8 +255,6 @@ single portable `.exe`.
 
 Planned, roughly in this order:
 
-- [ ] **Databases, next steps** — SSH tunnels (connections, the schema browser, the SQL console,
-      editing tables and query results, export and CSV import are done).
 - [ ] **macOS and Linux** builds (GPUI supports both; Graphyne isn't tested there yet).
 - [ ] **Faster start-up** — most of today's ~0.4 s goes to Direct3D initialization.
 - [ ] An extension gallery (install from a URL).

@@ -19,6 +19,7 @@ pub mod language;
 pub mod libraries;
 pub mod live_server;
 pub mod presets;
+pub mod process;
 pub mod project;
 pub mod python_env;
 pub mod python_tools;

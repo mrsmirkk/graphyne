@@ -40,6 +40,35 @@ pub struct ServerConfig {
     /// Credential Manager key of the password; `None` when there is no password.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
+    /// Reach the server through an SSH tunnel (`host` / `port` are then as seen from there).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshConfig>,
+    /// Connect to this address instead: the local end of the SSH tunnel. `host` still names
+    /// the server, for its TLS certificate. Never saved.
+    #[serde(skip)]
+    pub via: Option<std::net::SocketAddr>,
+}
+
+/// The SSH host a database server is reached through.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct SshConfig {
+    pub host: String,
+    pub port: u16,
+    /// Empty: ssh's default (`~/.ssh/config`, the Windows user name).
+    pub user: String,
+    /// A private key file; `None`: the user's usual keys and ssh-agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_file: Option<String>,
+    /// Credential Manager key of the SSH password / key passphrase.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+}
+
+impl Default for SshConfig {
+    fn default() -> Self {
+        Self { host: String::new(), port: 22, user: String::new(), key_file: None, secret: None }
+    }
 }
 
 /// Encryption of the connection, as in libpq's `sslmode`.
@@ -139,7 +168,8 @@ impl DbConfig {
             DbKind::Postgres(s) | DbKind::Mysql(s) => {
                 let user = if s.user.is_empty() { String::new() } else { format!("{}@", s.user) };
                 let db = if s.database.is_empty() { String::new() } else { format!("/{}", s.database) };
-                format!("{user}{}:{}{db}", s.host, s.port)
+                let via = s.ssh.as_ref().map(|t| format!(" via SSH {}", t.host)).unwrap_or_default();
+                format!("{user}{}:{}{db}{via}", s.host, s.port)
             }
         }
     }
@@ -212,7 +242,7 @@ mod tests {
         assert_eq!((a.id.as_str(), a.name.as_str()), ("shop-data", "Shop Data.sqlite"));
         let b = DbConfig::sqlite(Path::new("C:/q/shop data.db"), std::slice::from_ref(&a));
         assert_eq!(b.id, "shop-data-2");
-        let server = ServerConfig { host: "db.example.com".into(), port: 5432, database: "shop".into(), user: "app".into(), ssl: SslMode::Require, secret: Some("db/x".into()) };
+        let server = ServerConfig { host: "db.example.com".into(), port: 5432, database: "shop".into(), user: "app".into(), ssl: SslMode::Require, secret: Some("db/x".into()), ssh: None, via: None };
         let c = DbConfig::server("", DbKind::Postgres(server.clone()), &[a.clone(), b.clone()]);
         assert_eq!((c.name.as_str(), c.id.as_str()), ("shop@db.example.com", "shop-db-example-com"));
         assert_eq!(c.location(), "app@db.example.com:5432/shop");
@@ -221,8 +251,11 @@ mod tests {
         assert_eq!(c.kind.quote_table(None, "a\"b"), "\"a\"\"b\"");
 
         let file = std::env::temp_dir().join(format!("graphyne-dbconf-{}", std::process::id())).join("databases.json");
-        save_configs(&file, &[a.clone(), b.clone(), c.clone(), d.clone()]).unwrap();
-        assert_eq!(load_configs(&file), vec![a, b, c, d]);
+        let tunnel = SshConfig { host: "bastion".into(), user: "deploy".into(), key_file: Some("C:/k/id".into()), ..Default::default() };
+        let e = DbConfig::server("Behind SSH", DbKind::Postgres(ServerConfig { host: "10.0.0.5".into(), ssh: Some(tunnel), ..Default::default() }), &[]);
+        assert!(e.location().ends_with(" via SSH bastion"));
+        save_configs(&file, &[a.clone(), b.clone(), c.clone(), d.clone(), e.clone()]).unwrap();
+        assert_eq!(load_configs(&file), vec![a, b, c, d, e]);
         let json = std::fs::read_to_string(&file).unwrap();
         assert!(json.contains("\"driver\": \"sqlite\"") && json.contains("\"driver\": \"postgres\"") && json.contains("\"ssl\": \"require\""));
         assert!(!json.contains("password"));

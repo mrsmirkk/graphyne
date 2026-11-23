@@ -44,6 +44,11 @@ static OPEN_PROJECTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 /// Boot the application. The first CLI argument is the project folder. Without one the
 /// projects that were open at the last exit come back; with none, the Welcome window.
 pub fn run() {
+    // ssh started Graphyne to answer a password / passphrase prompt (an SSH tunnel to a
+    // database): answer and leave.
+    if graphyne_db::ssh::answer_askpass() {
+        return;
+    }
     let started = std::time::Instant::now();
     let trace = std::env::var_os("GRAPHYNE_STARTUP_TRACE").is_some();
     let mark = move |stage: &str| {

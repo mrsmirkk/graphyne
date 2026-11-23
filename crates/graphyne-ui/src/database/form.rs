@@ -1,13 +1,14 @@
-//! New / Edit Connection: a dialog for PostgreSQL and MySQL / MariaDB servers, with Test.
-//! The password is kept in the Windows Credential Manager, never in Graphyne's files.
+//! New / Edit Connection: a dialog for PostgreSQL and MySQL / MariaDB servers, with Test,
+//! optionally through an SSH tunnel. Passwords are kept in the Windows Credential Manager,
+//! never in Graphyne's files.
 
 use super::DbStore;
 use crate::components::tooltip;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::{self, c, color, color_a};
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent, SharedString, Subscription, Window, div, px};
-use graphyne_db::{DbConfig, DbKind, DbSession, ServerConfig, SslMode};
+use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent, PathPromptOptions, SharedString, Subscription, Window, div, px};
+use graphyne_db::{DbConfig, DbKind, DbSession, ServerConfig, SshConfig, SslMode};
 
 pub enum FormEvent {
     /// Saved; the connection's id.
@@ -54,6 +55,14 @@ pub struct ConnectionForm {
     user: Entity<TextInput>,
     password: Entity<TextInput>,
     ssl: SslMode,
+    /// Connect through an SSH tunnel (the fields below).
+    ssh: bool,
+    ssh_host: Entity<TextInput>,
+    ssh_port: Entity<TextInput>,
+    ssh_user: Entity<TextInput>,
+    ssh_key: Entity<TextInput>,
+    /// The SSH password, or the key's passphrase.
+    ssh_password: Entity<TextInput>,
     status: Option<(SharedString, Tone)>,
     testing: bool,
     _subs: Vec<Subscription>,
@@ -79,6 +88,9 @@ impl ConnectionForm {
             input("none", cx),
         );
         password.update(cx, |p, cx| p.set_masked(true, cx));
+        let (ssh_host, ssh_port, ssh_user, ssh_key, ssh_password) =
+            (input("bastion.example.com", cx), input("22", cx), input("from ~/.ssh/config, else your Windows user", cx), input("your usual keys and ssh-agent", cx), input("none, or the key's passphrase", cx));
+        ssh_password.update(cx, |p, cx| p.set_masked(true, cx));
         let existing = editing.as_ref().and_then(|id| store.read(cx).entry(id)).map(|e| e.config.clone());
         let (engine, server, title) = match existing.as_ref().map(|c| (&c.kind, c.name.clone())) {
             Some((DbKind::Postgres(s), title)) => (Engine::Postgres, s.clone(), title),
@@ -92,9 +104,15 @@ impl ConnectionForm {
         set(&database, server.database.clone(), cx);
         set(&user, server.user.clone(), cx);
         database.update(cx, |f, cx| f.set_placeholder(engine.database_hint(), cx));
-        // The saved password is read back so Save keeps it.
-        if let Some(key) = server.secret.clone() {
-            let field = password.clone();
+        let tunnel = server.ssh.clone().unwrap_or_default();
+        set(&ssh_host, tunnel.host.clone(), cx);
+        set(&ssh_port, tunnel.port.to_string(), cx);
+        set(&ssh_user, tunnel.user.clone(), cx);
+        set(&ssh_key, tunnel.key_file.clone().unwrap_or_default(), cx);
+        // The saved passwords are read back so Save keeps them.
+        for (key, field) in [(server.secret.clone(), &password), (tunnel.secret.clone(), &ssh_password)] {
+            let Some(key) = key else { continue };
+            let field = field.clone();
             cx.spawn(async move |_, cx| {
                 if let Ok(Some(p)) = cx.background_spawn(async move { graphyne_db::secrets::get_password(&key) }).await {
                     field.update(cx, |f, cx| f.set_text(p, cx)).ok();
@@ -103,7 +121,7 @@ impl ConnectionForm {
             .detach();
         }
         let mut subs = Vec::new();
-        for field in [&name, &host, &port, &database, &user, &password] {
+        for field in [&name, &host, &port, &database, &user, &password, &ssh_host, &ssh_port, &ssh_user, &ssh_key, &ssh_password] {
             subs.push(cx.subscribe_in(field, window, |this, _, ev: &TextInputEvent, window, cx| match ev {
                 TextInputEvent::Submit => this.save(window, cx),
                 TextInputEvent::Cancel => cx.emit(FormEvent::Closed),
@@ -117,11 +135,62 @@ impl ConnectionForm {
             }));
         }
         window.focus(&host.focus_handle(cx));
-        Self { focus_handle: cx.focus_handle(), store, editing, engine, name, host, port, database, user, password, ssl: server.ssl, status: None, testing: false, _subs: subs }
+        Self {
+            focus_handle: cx.focus_handle(),
+            store,
+            editing,
+            engine,
+            name,
+            host,
+            port,
+            database,
+            user,
+            password,
+            ssl: server.ssl,
+            ssh: server.ssh.is_some(),
+            ssh_host,
+            ssh_port,
+            ssh_user,
+            ssh_key,
+            ssh_password,
+            status: None,
+            testing: false,
+            _subs: subs,
+        }
     }
 
-    fn fields(&self) -> [&Entity<TextInput>; 6] {
-        [&self.name, &self.host, &self.port, &self.database, &self.user, &self.password]
+    /// The fields in Tab order (the SSH ones only while the tunnel is on).
+    fn fields(&self) -> Vec<&Entity<TextInput>> {
+        let mut fields = vec![&self.name, &self.host, &self.port, &self.database, &self.user, &self.password];
+        if self.ssh {
+            fields.extend([&self.ssh_host, &self.ssh_port, &self.ssh_user, &self.ssh_key, &self.ssh_password]);
+        }
+        fields
+    }
+
+    fn set_ssh(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if on == self.ssh {
+            return;
+        }
+        self.ssh = on;
+        self.status = None;
+        if on && self.ssh_host.read(cx).text().trim().is_empty() {
+            window.focus(&self.ssh_host.focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    /// Pick the private key file (starting in ~/.ssh when there is one).
+    fn browse_key(&mut self, cx: &mut Context<Self>) {
+        let ssh_dir = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(|h| std::path::PathBuf::from(h).join(".ssh")).filter(|d| d.is_dir());
+        let picked = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Use Key".into()), directory: ssh_dir });
+        let field = self.ssh_key.clone();
+        cx.spawn(async move |_, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            field.update(cx, |f, cx| f.set_text(path.to_string_lossy().to_string(), cx)).ok();
+        })
+        .detach();
     }
 
     fn set_engine(&mut self, engine: Engine, cx: &mut Context<Self>) {
@@ -149,7 +218,22 @@ impl ConnectionForm {
             p => p.parse::<u16>().ok().filter(|p| *p > 0).ok_or("The port must be a number from 1 to 65535")?,
         };
         let host = text(&self.host);
-        let server = ServerConfig { host: if host.is_empty() { "localhost".into() } else { host }, port, database: text(&self.database), user: text(&self.user), ssl: self.ssl, secret: None };
+        let ssh = if self.ssh {
+            let host = text(&self.ssh_host);
+            if host.is_empty() {
+                return Err("Enter the SSH host, or turn the SSH tunnel off".into());
+            }
+            let port = match text(&self.ssh_port) {
+                p if p.is_empty() => 22,
+                p => p.parse::<u16>().ok().filter(|p| *p > 0).ok_or("The SSH port must be a number from 1 to 65535")?,
+            };
+            // A path pasted from Explorer ("Copy as path") comes in quotes.
+            let key = text(&self.ssh_key).trim_matches('"').to_string();
+            Some(SshConfig { host, port, user: text(&self.ssh_user), key_file: (!key.is_empty()).then_some(key), secret: None })
+        } else {
+            None
+        };
+        let server = ServerConfig { host: if host.is_empty() { "localhost".into() } else { host }, port, database: text(&self.database), user: text(&self.user), ssl: self.ssl, secret: None, ssh, via: None };
         Ok(match self.engine {
             Engine::Postgres => DbKind::Postgres(server),
             Engine::Mysql => DbKind::Mysql(server),
@@ -169,13 +253,15 @@ impl ConnectionForm {
             }
         };
         let password = self.password.read(cx).text().to_string();
+        let ssh_password = self.ssh_password.read(cx).text().to_string();
+        let through_ssh = self.ssh;
         let config = DbConfig { id: "test".into(), name: "test".into(), kind };
         self.testing = true;
-        self.status = Some(("Connecting…".into(), Tone::Info));
+        self.status = Some((if through_ssh { "Opening the SSH tunnel…" } else { "Connecting…" }.into(), Tone::Info));
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    let session = DbSession::open_with(&config, (!password.is_empty()).then_some(password))?;
+                    let session = DbSession::open_with(&config, (!password.is_empty()).then_some(password), (!ssh_password.is_empty()).then_some(ssh_password))?;
                     session.version().recv().map_err(|_| "the connection was closed".to_string())?
                 })
                 .await;
@@ -204,8 +290,9 @@ impl ConnectionForm {
         };
         let name = self.name.read(cx).text().to_string();
         let password = self.password.read(cx).text().to_string();
+        let ssh_password = if self.ssh { self.ssh_password.read(cx).text().to_string() } else { String::new() };
         let editing = self.editing.clone();
-        let id = self.store.update(cx, |s, cx| s.save_server(editing.as_deref(), &name, kind, password, cx));
+        let id = self.store.update(cx, |s, cx| s.save_server(editing.as_deref(), &name, kind, password, ssh_password, cx));
         cx.emit(FormEvent::Saved(id));
     }
 
@@ -271,6 +358,7 @@ impl Render for ConnectionForm {
         };
         let engine = self.engine;
         let ssl = self.ssl;
+        let ssh = self.ssh;
         let ssl_tip = |mode: SslMode| match mode {
             SslMode::Prefer => "Encrypt when the server can (the certificate is not checked)",
             SslMode::Require => "Always encrypt (the certificate is not checked)",
@@ -330,7 +418,40 @@ impl Render for ConnectionForm {
                     }))
                 }))),
             )
-            .child(div().text_size(px(11.5)).text_color(color(c::TEXT_DIM)).child("The password is kept in the Windows Credential Manager, not in Graphyne's files."))
+            .child(
+                row().child(label("SSH tunnel")).child(
+                    div()
+                        .flex()
+                        .gap(px(4.))
+                        .p(px(3.))
+                        .rounded(px(8.))
+                        .bg(color(c::ISLAND))
+                        .child(segment("ssh-off".into(), "Off", !ssh).on_click(cx.listener(|this, _, window, cx| this.set_ssh(false, window, cx))))
+                        .child(
+                            segment("ssh-on".into(), "On", ssh)
+                                .tooltip(tooltip("Reach the database through an SSH host (the system's OpenSSH client)", None))
+                                .on_click(cx.listener(|this, _, window, cx| this.set_ssh(true, window, cx))),
+                        ),
+                ),
+            )
+            .when(ssh, |card| {
+                card.child(
+                    row()
+                        .child(label("SSH host"))
+                        .child(field(&self.ssh_host, window, cx))
+                        .child(div().flex_none().text_color(color(c::TEXT_MUTED)).child("Port"))
+                        .child(div().flex_none().w(px(80.)).child(field(&self.ssh_port, window, cx))),
+                )
+                .child(row().child(label("SSH user")).child(field(&self.ssh_user, window, cx)))
+                .child(
+                    row().child(label("Key file")).child(field(&self.ssh_key, window, cx)).child(
+                        button("form-ssh-key", "…", false).tooltip(tooltip("Choose the private key file", None)).on_click(cx.listener(|this, _, _, cx| this.browse_key(cx))),
+                    ),
+                )
+                .child(row().child(label("SSH password")).child(field(&self.ssh_password, window, cx)))
+                .child(div().text_size(px(11.5)).text_color(color(c::TEXT_DIM)).child("Host and Port above are as the SSH host sees them (often localhost)."))
+            })
+            .child(div().text_size(px(11.5)).text_color(color(c::TEXT_DIM)).child("Passwords are kept in the Windows Credential Manager, not in Graphyne's files."))
             .children(status)
             .child(
                 div()

@@ -116,25 +116,39 @@ impl DbStore {
 
     /// Add a server connection (`id` empty) or change one; the password goes to the
     /// Credential Manager (an empty one removes it). Returns the connection's id.
-    pub fn save_server(&mut self, id: Option<&str>, name: &str, mut kind: DbKind, password: String, cx: &mut Context<Self>) -> String {
+    pub fn save_server(&mut self, id: Option<&str>, name: &str, mut kind: DbKind, password: String, ssh_password: String, cx: &mut Context<Self>) -> String {
         let others: Vec<DbConfig> = self.entries.iter().filter(|e| Some(e.config.id.as_str()) != id).map(|e| e.config.clone()).collect();
         let existing = id.and_then(|id| self.entry(id)).map(|e| e.config.clone());
-        // Keep the old password key so the saved password is replaced, not duplicated.
-        let old_key = existing.as_ref().and_then(|c| c.kind.server()).and_then(|s| s.secret.clone());
+        // Keep the old password keys so the saved passwords are replaced, not duplicated.
+        let old_server = existing.as_ref().and_then(|c| c.kind.server());
+        let old_key = old_server.and_then(|s| s.secret.clone());
+        let old_ssh_key = old_server.and_then(|s| s.ssh.as_ref()).and_then(|t| t.secret.clone());
         let config = match &existing {
             Some(old) => DbConfig { id: old.id.clone(), name: if name.trim().is_empty() { old.name.clone() } else { name.trim().to_string() }, kind: kind.clone() },
             None => DbConfig::server(name, kind.clone(), &others),
         };
         let key = old_key.unwrap_or_else(|| graphyne_db::secrets::new_key(&config.id));
+        let ssh_key = old_ssh_key.clone().unwrap_or_else(|| graphyne_db::secrets::new_key(&format!("{}/ssh", config.id)));
+        let mut tunnel = false;
         if let DbKind::Postgres(s) | DbKind::Mysql(s) = &mut kind {
             s.secret = (!password.is_empty()).then(|| key.clone());
+            if let Some(t) = &mut s.ssh {
+                t.secret = (!ssh_password.is_empty()).then(|| ssh_key.clone());
+                tunnel = true;
+            }
         }
         let config = DbConfig { kind, ..config };
         let id = config.id.clone();
         // Written before anything connects (a quick system call): the panel opens the
-        // connection right after Save and must find the password.
+        // connection right after Save and must find the passwords.
         if let Err(e) = graphyne_db::secrets::set_password(&key, &password) {
             log::warn!("{e}");
+        }
+        // No tunnel any more: its saved password goes too (an empty password removes it).
+        if tunnel || old_ssh_key.is_some() {
+            if let Err(e) = graphyne_db::secrets::set_password(&ssh_key, if tunnel { &ssh_password } else { "" }) {
+                log::warn!("{e}");
+            }
         }
         match self.entry_mut(&id) {
             Some(entry) => {
@@ -151,11 +165,17 @@ impl DbStore {
         id
     }
 
-    /// Forget a connection (its open session closes, its saved password is removed). The
+    /// Forget a connection (its open session closes, its saved passwords are removed). The
     /// database itself is not touched.
     pub fn remove(&mut self, id: &str, cx: &mut Context<Self>) {
-        if let Some(key) = self.entry(id).and_then(|e| e.config.kind.server()).and_then(|s| s.secret.clone()) {
-            cx.background_spawn(async move { drop(graphyne_db::secrets::delete_password(&key)) }).detach();
+        if let Some(server) = self.entry(id).and_then(|e| e.config.kind.server()) {
+            let keys: Vec<String> = server.secret.iter().chain(server.ssh.as_ref().and_then(|t| t.secret.as_ref())).cloned().collect();
+            cx.background_spawn(async move {
+                for key in keys {
+                    drop(graphyne_db::secrets::delete_password(&key));
+                }
+            })
+            .detach();
         }
         self.entries.retain(|e| e.config.id != id);
         self.save(cx);

@@ -33,6 +33,9 @@ fn unreachable(e: &mysql::Error) -> bool {
 /// The addresses to try: "localhost" is IPv4 first, then IPv6 (the driver tries only one
 /// address per name, and servers often listen on 127.0.0.1 only).
 fn hosts(cfg: &ServerConfig) -> Vec<String> {
+    if let Some(via) = cfg.via {
+        return vec![via.ip().to_string()];
+    }
     match cfg.host.trim() {
         "" | "localhost" => vec!["127.0.0.1".into(), "::1".into()],
         host => vec![host.to_string()],
@@ -42,7 +45,7 @@ fn hosts(cfg: &ServerConfig) -> Vec<String> {
 fn opts(cfg: &ServerConfig, host: &str, password: Option<String>, ssl: Option<mysql::SslOpts>) -> mysql::Opts {
     mysql::OptsBuilder::new()
         .ip_or_hostname(Some(host.to_string()))
-        .tcp_port(cfg.port)
+        .tcp_port(cfg.via.map_or(cfg.port, |v| v.port()))
         .prefer_socket(false)
         .user((!cfg.user.is_empty()).then(|| cfg.user.clone()))
         .pass(password)
@@ -55,7 +58,10 @@ fn opts(cfg: &ServerConfig, host: &str, password: Option<String>, ssl: Option<my
 pub(crate) fn open(cfg: &ServerConfig, password: Option<String>) -> Result<(My, Interrupter), String> {
     // Like libpq: only "verify" checks the certificate.
     let verify = cfg.ssl == SslMode::VerifyFull;
-    let tls = mysql::SslOpts::default().with_danger_accept_invalid_certs(!verify).with_danger_skip_domain_validation(!verify);
+    // Through an SSH tunnel the driver connects to 127.0.0.1, and it can only check the
+    // certificate's name against the address it connects to: there, "verify" checks the
+    // certificate but not its name.
+    let tls = mysql::SslOpts::default().with_danger_accept_invalid_certs(!verify).with_danger_skip_domain_validation(!verify || cfg.via.is_some());
     let connect_to = |host: &str, ssl: Option<mysql::SslOpts>| {
         let o = opts(cfg, host, password.clone(), ssl);
         mysql::Conn::new(o.clone()).map(|c| (c, o))
