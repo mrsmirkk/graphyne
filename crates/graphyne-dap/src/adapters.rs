@@ -51,7 +51,7 @@ pub fn resolve_with_progress(file: &Path, root: &Path, progress: &dyn Fn(&str)) 
         LanguageId::Python => python(file, &dir, &title, root),
         LanguageId::Rust => rust(file, root, &title, progress),
         LanguageId::C | LanguageId::Cpp => native(file, &dir, &title, lang, progress),
-        LanguageId::Go => go(file, &dir, &title),
+        LanguageId::Go => go(file, &dir, &title, progress),
         LanguageId::JavaScript | LanguageId::TypeScript => node(file, &dir, &title),
         other => Err(format!("No debugger configured for {} yet", other.name())),
     }
@@ -325,8 +325,51 @@ fn native(file: &Path, dir: &Path, title: &str, lang: LanguageId, progress: &dyn
     Ok(Resolved { name, adapter_id: "lldb", program, args, env: Vec::new(), transport, cwd: dir.to_path_buf(), launch })
 }
 
-fn go(file: &Path, dir: &Path, title: &str) -> Result<Resolved, String> {
-    let dlv = which("dlv").ok_or("Delve not found (go install github.com/go-delve/delve/cmd/dlv@latest)")?;
+/// The delve release Graphyne installs with `go install` when `dlv` isn't there (MIT).
+const DELVE_VERSION: &str = "v1.27.2";
+
+/// `dlv`: `GRAPHYNE_DLV_PATH`, on PATH, in GOPATH/bin (where `go install` puts it), else
+/// Graphyne's own copy, built with `go install` on first use — the Go toolchain checks the
+/// download against its checksum database.
+fn delve(progress: &dyn Fn(&str)) -> Result<PathBuf, String> {
+    let exe_name = if cfg!(windows) { "dlv.exe" } else { "dlv" };
+    if let Some(p) = std::env::var_os("GRAPHYNE_DLV_PATH").filter(|p| !p.is_empty()).map(PathBuf::from) {
+        return if p.is_file() { Ok(p) } else { Err(format!("GRAPHYNE_DLV_PATH: {} not found", p.display())) };
+    }
+    if let Some(p) = which("dlv") {
+        return Ok(p);
+    }
+    let go = which("go").ok_or("Go isn't installed (go.dev/dl), so it can't be debugged")?;
+    let gopath = hidden_command(&go.to_string_lossy()).args(["env", "GOPATH"]).stdin(std::process::Stdio::null()).output().ok();
+    if let Some(bin) = gopath.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|g| !g.is_empty()) {
+        let p = Path::new(&bin).join("bin").join(exe_name);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    let dir = graphyne_core::session::state_dir().ok_or("no folder for Graphyne's state")?.join("tools").join(format!("delve-{DELVE_VERSION}"));
+    let exe = dir.join(exe_name);
+    if exe.is_file() {
+        return Ok(exe);
+    }
+    progress(&format!("Installing the Go debugger (delve {DELVE_VERSION}, once)…"));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let out = hidden_command(&go.to_string_lossy())
+        .args(["install", &format!("github.com/go-delve/delve/cmd/dlv@{DELVE_VERSION}")])
+        .env("GOBIN", &dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("go install: {e}"))?;
+    if !out.status.success() || !exe.is_file() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("failed").trim();
+        return Err(format!("Could not install the Go debugger (go install github.com/go-delve/delve/cmd/dlv@{DELVE_VERSION}): {last}"));
+    }
+    Ok(exe)
+}
+
+fn go(file: &Path, dir: &Path, title: &str, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
+    let dlv = delve(progress)?;
     let port = free_port().ok_or("no free TCP port")?;
     let program = graphyne_core::run::find_up(file, dir, "go.mod").unwrap_or_else(|| file.to_path_buf());
     Ok(Resolved {
@@ -337,6 +380,11 @@ fn go(file: &Path, dir: &Path, title: &str) -> Result<Resolved, String> {
         env: Vec::new(),
         transport: Transport::Tcp { port },
         cwd: dir.to_path_buf(),
-        launch: json!({ "request": "launch", "name": format!("Graphyne: {title}"), "mode": "debug", "program": program, "cwd": dir }),
+        // Delve sends the program's output to the debug console ("remote"; it has no terminal
+        // tab on Windows) and builds into the temp folder, not `__debug_bin.exe` in the project.
+        launch: json!({
+            "request": "launch", "name": format!("Graphyne: {title}"), "mode": "debug", "program": program, "cwd": dir,
+            "outputMode": "remote", "output": std::env::temp_dir().join(if cfg!(windows) { "graphyne-debug-go.exe" } else { "graphyne-debug-go" })
+        }),
     })
 }

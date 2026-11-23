@@ -120,7 +120,12 @@ single portable `.exe`.
   otherwise with the same CodeLLDB as Rust — breakpoints, stepping into functions, inline values,
   structs, arrays, `std::string` and `std::vector` elements, and expressions
   (`p.x * p.y + items[2]`). MinGW's and w64devkit's GDB have no Python, so CodeLLDB is used there.
-- Go via `dlv` — wired up, not yet verified.
+- **Go** via [Delve](https://github.com/go-delve/delve) — tested with Go 1.27: breakpoints,
+  stepping into functions, inline values, slices, maps and structs shown as Go types, and
+  expressions (`p.X*p.Y + items[2]`, `len(name)`); the program's output appears in the debug
+  console. If `dlv` isn't installed, Graphyne builds it once with `go install` (the Go toolchain
+  checks the download) into its own folder. The debug build goes to the temp folder, not
+  `__debug_bin` in the project.
 
 ### Python projects
 - When a Python file appears in a project (or on the first Run / Debug), Graphyne creates `.venv`
@@ -247,7 +252,6 @@ Planned, roughly in this order:
 
 - [ ] **Databases, next steps** — SSH tunnels (connections, the schema browser, the SQL console,
       editing tables and query results, export and CSV import are done).
-- [ ] **Debugging Go** verified end to end (Python, JavaScript / TypeScript, Rust, C and C++ are).
 - [ ] **macOS and Linux** builds (GPUI supports both; Graphyne isn't tested there yet).
 - [ ] **Faster start-up** — most of today's ~0.4 s goes to Direct3D initialization.
 - [ ] An extension gallery (install from a URL).
