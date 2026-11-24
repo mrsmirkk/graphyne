@@ -1,7 +1,7 @@
 //! Language → language-server matrix (spec §6.3) and executable discovery.
 
 use graphyne_core::LanguageId;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 pub struct ServerSpec {
@@ -37,7 +37,10 @@ static CSHARP: &[ServerSpec] = &[
     spec!("csharp-ls", "csharp-ls", [], "dotnet tool install -g csharp-ls"),
 ];
 static JAVA: &[ServerSpec] = &[spec!("jdtls", "jdtls", [], "install Eclipse JDT LS")];
-static KOTLIN: &[ServerSpec] = &[spec!("kotlin-ls", "kotlin-language-server", [], "install kotlin-language-server")];
+static KOTLIN: &[ServerSpec] = &[
+    spec!("kotlin-lsp", "kotlin-lsp", ["--stdio"], "install JetBrains' Kotlin LSP (github.com/Kotlin/kotlin-lsp)"),
+    spec!("kotlin-ls", "kotlin-language-server", [], "install kotlin-language-server"),
+];
 static PHP: &[ServerSpec] = &[spec!("intelephense", "intelephense", ["--stdio"], "npm i -g intelephense")];
 static DART: &[ServerSpec] = &[spec!("dart", "dart", ["language-server"], "install the Dart SDK")];
 static LUA: &[ServerSpec] = &[spec!("lua-ls", "lua-language-server", [], "install lua-language-server")];
@@ -150,12 +153,26 @@ pub fn which(program: &str) -> Option<PathBuf> {
     None
 }
 
-/// First installed server for a language. Blocking (filesystem probing).
-pub fn find(lang: LanguageId) -> Result<(&'static ServerSpec, PathBuf), Option<&'static ServerSpec>> {
+/// How to start a server: the program, its arguments and extra environment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Launch {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+/// First installed server for a language: one on PATH (the user's own) wins over the copy
+/// Graphyne installed (`managed`). Blocking (filesystem probing, sometimes a version check).
+pub fn find(lang: LanguageId, root: &Path) -> Result<(&'static ServerSpec, Launch), Option<&'static ServerSpec>> {
     let specs = specs_for(lang);
     for spec in specs {
         if let Some(path) = which(spec.program) {
-            return Ok((spec, path));
+            return Ok((spec, Launch { program: path, args: spec.args.iter().map(|a| a.to_string()).collect(), env: Vec::new() }));
+        }
+    }
+    for spec in specs {
+        if let Some(launch) = crate::managed::launch(spec.name, root) {
+            return Ok((spec, launch));
         }
     }
     Err(specs.first())

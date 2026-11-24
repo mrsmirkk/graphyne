@@ -29,6 +29,19 @@ fn fence_language(tag: &str) -> Option<LanguageId> {
         "cpp" | "c++" => LanguageId::Cpp,
         "json" => LanguageId::Json,
         "toml" => LanguageId::Toml,
+        "php" => LanguageId::Php,
+        "java" => LanguageId::Java,
+        "kotlin" | "kt" => LanguageId::Kotlin,
+        "scala" => LanguageId::Scala,
+        "csharp" | "cs" | "c#" => LanguageId::CSharp,
+        "ruby" | "rb" => LanguageId::Ruby,
+        "lua" => LanguageId::Lua,
+        "dart" => LanguageId::Dart,
+        "swift" => LanguageId::Swift,
+        "sh" | "bash" | "shell" => LanguageId::Shell,
+        "sql" => LanguageId::Sql,
+        "html" => LanguageId::Html,
+        "css" => LanguageId::Css,
         _ => return None,
     })
 }
@@ -43,7 +56,8 @@ fn highlight_code(code: &str, lang: Option<LanguageId>) -> Vec<(Range<usize>, Hi
         .collect()
 }
 
-/// Inline markup: `code`, **bold**, *italic*, [link](url), `\` escapes.
+/// Inline markup: `code`, **bold** / __bold__, *italic* / _italic_, [link](url), `\` escapes.
+/// Underscores mark emphasis only at a word's edge, so `snake_case` stays as it is.
 fn inline(src: &str) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
     let chars: Vec<char> = src.chars().collect();
     let mut out = String::new();
@@ -91,6 +105,36 @@ fn inline(src: &str) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
             } else {
                 out.push(ch);
                 i += 1;
+            }
+        } else if ch == '_' && (i == 0 || !chars[i - 1].is_alphanumeric()) && i + 1 < chars.len() {
+            // __bold__ or _italic_, closed by underscores that end a word.
+            let double = chars[i + 1] == '_';
+            let open = if double { 2 } else { 1 };
+            let closes_at = |j: usize| {
+                let end = j + open;
+                (if double { j + 1 < chars.len() && chars[j] == '_' && chars[j + 1] == '_' } else { chars[j] == '_' })
+                    && j > i + open
+                    && !chars[j - 1].is_whitespace()
+                    && chars.get(end).is_none_or(|c| !c.is_alphanumeric())
+            };
+            match (i + open..chars.len()).find(|&j| closes_at(j)) {
+                Some(end) if chars.get(i + open).is_some_and(|c| !c.is_whitespace()) => {
+                    let text: String = chars[i + open..end].iter().collect();
+                    let style = if double {
+                        HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), color: Some(color(c::TEXT)), ..Default::default() }
+                    } else {
+                        HighlightStyle { font_style: Some(FontStyle::Italic), ..Default::default() }
+                    };
+                    push_styled(&mut out, &mut hl, &text, style);
+                    i = end + open;
+                }
+                _ => {
+                    // Not closed: the underscores are text (both of a pair).
+                    for _ in 0..open {
+                        out.push('_');
+                    }
+                    i += open;
+                }
             }
         } else if ch == '[' {
             let close = chars[i + 1..].iter().position(|c| *c == ']').map(|p| i + 1 + p);
@@ -215,5 +259,16 @@ mod tests {
             _ => panic!(),
         }
         assert!(matches!(&blocks[3], MdBlock::Para { bullet: true, .. }));
+    }
+
+    #[test]
+    fn underscore_emphasis() {
+        // intelephense: `__greet__` (bold), `_@param_ string $name` (italic).
+        assert_eq!(inline("__greet__").0, "greet");
+        assert_eq!(inline("_@param_ string $name").0, "@param string $name");
+        // Not emphasis: identifiers and lone underscores.
+        assert_eq!(inline("snake_case_name and __init__ma").0, "snake_case_name and __init__ma");
+        assert_eq!(inline("a _ b").0, "a _ b");
+        assert_eq!(inline("__init__").0, "init");
     }
 }

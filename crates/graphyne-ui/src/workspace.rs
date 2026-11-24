@@ -179,6 +179,10 @@ pub struct Workspace {
     pip_offer: Option<SharedString>,
     /// No Python on this computer for Run / Debug: offer to install this version.
     python_offer: Option<&'static str>,
+    /// "Install intelephense?" for the language of a file just opened (its server is missing).
+    lsp_offer: Option<(LanguageId, graphyne_lsp::managed::Offer)>,
+    /// Servers whose offer got "Not now" this session.
+    lsp_declined: HashSet<&'static str>,
     /// Packages changed in the project's environment: refresh the language server soon.
     packages_refresh: Option<gpui::Task<()>>,
     /// Languages of the project with a toolchain (External Libraries).
@@ -302,6 +306,15 @@ impl Workspace {
         }));
         subs.push(cx.subscribe(&lsp_store, |this, _, ev, cx| match ev {
             crate::lsp_store::LspStoreEvent::Notify(msg, err) => this.notify_user(msg.clone(), *err, cx),
+            crate::lsp_store::LspStoreEvent::OfferInstall(lang) => {
+                let offer = this.lsp_store.read(cx).offer(*lang);
+                if let Some(offer) = offer.filter(|o| !this.lsp_declined.contains(o.server)) {
+                    if this.lsp_offer.is_none() {
+                        this.lsp_offer = Some((*lang, offer));
+                        cx.notify();
+                    }
+                }
+            }
             crate::lsp_store::LspStoreEvent::ApplyEdit { client, id, edits } => {
                 this.apply_file_edits(edits.clone(), cx);
                 client.respond(id.clone(), serde_json::json!({ "applied": true }));
@@ -410,6 +423,8 @@ impl Workspace {
             uv_here: false,
             pip_offer: None,
             python_offer: None,
+            lsp_offer: None,
+            lsp_declined: HashSet::new(),
             library_langs: Vec::new(),
             missing_tools: HashMap::new(),
             checked_tools: HashSet::new(),
@@ -1547,6 +1562,74 @@ impl Workspace {
         )
     }
 
+    /// A file's language server is missing and Graphyne can install it: offer that.
+    fn render_lsp_offer(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let (lang, offer) = self.lsp_offer.clone()?;
+        let button = |id: &'static str, label: SharedString, primary: bool| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .h(px(28.))
+                .px(px(12.))
+                .rounded(px(6.))
+                .border_1()
+                .cursor_pointer()
+                .text_size(px(theme::UI_SMALL))
+                .when(primary, |d| d.bg(color(c::ACCENT)).border_color(color(c::ACCENT)).text_color(color(0xFFFFFF)).hover(|s| s.bg(color_a(c::ACCENT, 0.85))))
+                .when(!primary, |d| d.border_color(color(c::POPUP_BORDER)).text_color(color(c::TEXT)).hover(|s| s.bg(color(c::HOVER))))
+                .child(label)
+        };
+        let name = lang.name();
+        Some(
+            div()
+                .id("lsp-offer")
+                .occlude()
+                .absolute()
+                .right(px(16.))
+                .bottom(px(theme::STATUS_BAR_HEIGHT + 10.))
+                .w(px(420.))
+                .p(px(14.))
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .rounded(px(10.))
+                .bg(color(c::POPUP))
+                .border_1()
+                .border_color(color(c::POPUP_BORDER))
+                .shadow_lg()
+                .font_family(theme::fonts().ui)
+                .text_size(px(theme::UI_TEXT))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(icon(Icon::Bolt, 14., color(c::ACCENT)))
+                        .child(div().text_color(color(c::TEXT)).font_weight(gpui::FontWeight::MEDIUM).child(format!("Code insight for {name}"))),
+                )
+                .child(div().text_color(color(c::TEXT_MUTED)).child(format!(
+                    "{name} needs a language server for completion, documentation on hover, go to definition and errors as you type.                      Graphyne can install {} ({}) into its own folder.",
+                    offer.title, offer.size
+                )))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.))
+                        .child(button("lsp-offer-install", format!("Install {}", offer.title).into(), true).on_click(cx.listener(move |this, _, _, cx| {
+                            this.lsp_offer = None;
+                            this.lsp_store.update(cx, |s, cx| s.install(lang, cx));
+                            cx.notify();
+                        })))
+                        .child(button("lsp-offer-dismiss", "Not now".into(), false).on_click(cx.listener(move |this, _, _, cx| {
+                            this.lsp_offer = None;
+                            this.lsp_declined.insert(offer.server);
+                            cx.notify();
+                        }))),
+                ),
+        )
+    }
+
     /// uv failed to install the project's packages: offer pip for this project.
     fn render_pip_offer(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let error = self.pip_offer.clone()?;
@@ -2385,14 +2468,22 @@ impl Workspace {
 
         let files_indexed = self.files.len();
         let indexing = self.indexing;
-        let lsp_status = self.pane.read(cx).active_editor().map(|e| e.read(cx).language).map(|l| self.lsp_store.read(cx).status_for(l));
+        let active_lang = self.pane.read(cx).active_editor().map(|e| e.read(cx).language);
+        let lsp_status = active_lang.map(|l| self.lsp_store.read(cx).status_for(l));
+        // Clicking the bolt installs a missing server Graphyne knows how to install.
+        let installable = matches!(&lsp_status, Some(crate::lsp_store::ServerStatus::Missing { offer: Some(o), .. }) if o.blocked.is_none());
         let (bolt_color, bolt_tip) = {
             use crate::lsp_store::ServerStatus as S;
             match &lsp_status {
                 Some(S::Ready { server }) => (color(c::ACCENT), format!("Smart Mode: {server} is ready ({files_indexed} files indexed)")),
                 Some(S::Indexing { server, message }) => (color(c::YELLOW), format!("Smart Mode: {server} - {message}")),
                 Some(S::Starting) => (color(c::YELLOW), "Smart Mode: starting language server...".to_string()),
-                Some(S::Missing { program, hint }) => (color(c::TEXT_DIM), format!("No language server ({program} not found). Install: {hint}")),
+                Some(S::Missing { offer: Some(o), .. }) => match &o.blocked {
+                    None => (color(c::TEXT_DIM), format!("No language server. Click to install {} ({})", o.title, o.size)),
+                    Some(why) => (color(c::TEXT_DIM), format!("No language server: {} can't be installed yet, {why}", o.title)),
+                },
+                Some(S::Missing { program, hint, offer: None }) => (color(c::TEXT_DIM), format!("No language server ({program} not found). Install: {hint}")),
+                Some(S::Installing { title, message }) => (color(c::YELLOW), format!("Installing {title}: {message}")),
                 Some(S::Failed { server, error }) => (color(c::RED), format!("{server} failed: {error}")),
                 Some(S::None) | None => (
                     if indexing { color(c::TEXT_DIM) } else { color(c::ACCENT) },
@@ -2408,7 +2499,12 @@ impl Workspace {
             .justify_end()
             .gap(px(2.))
             .child(
-                title_button("smart-mode", Icon::Bolt, bolt_color).tooltip(tooltip(bolt_tip, None)),
+                title_button("smart-mode", Icon::Bolt, bolt_color).tooltip(tooltip(bolt_tip, None)).when_some(active_lang.filter(|_| installable), |b, lang| {
+                    b.on_click(cx.listener(move |this, _, _, cx| {
+                        this.lsp_offer = None;
+                        this.lsp_store.update(cx, |s, cx| s.install(lang, cx));
+                    }))
+                }),
             )
             .child(
                 title_button("run", Icon::Play, color(c::TEXT))
@@ -3282,6 +3378,7 @@ impl Render for Workspace {
         let requirements_ask = self.render_requirements_ask(cx);
         let pip_offer = self.render_pip_offer(cx);
         let python_offer = self.render_python_offer(cx);
+        let lsp_offer = self.render_lsp_offer(cx);
         let menu = self.render_menu(cx);
 
         let center = div()
@@ -3374,6 +3471,7 @@ impl Render for Workspace {
             .children(requirements_ask)
             .children(pip_offer)
             .children(python_offer)
+            .children(lsp_offer)
             .children(notifications)
             .children(menu)
             .children(self.render_python_menu(cx))

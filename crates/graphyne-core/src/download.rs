@@ -34,21 +34,37 @@ fn hidden(program: &Path) -> Command {
     cmd
 }
 
+/// `url` into `to` with the system's curl. A connection the server drops halfway (Eclipse's
+/// mirrors do) is resumed, a few times, from where it stopped.
+fn curl(url: &str, to: &Path) -> Result<(), String> {
+    let _ = std::fs::remove_file(to);
+    let mut last = String::new();
+    for _ in 0..4 {
+        let out = hidden(&system_tool("curl"))
+            .args(["-fsSL", "--retry", "2", "--connect-timeout", "15", "-C", "-", "-o"])
+            .arg(to)
+            .arg(url)
+            .output()
+            .map_err(|e| format!("curl: {e}"))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        last = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        // 22: an HTTP error (404…), which trying again won't fix.
+        if out.status.code() == Some(22) {
+            break;
+        }
+    }
+    let _ = std::fs::remove_file(to);
+    Err(last)
+}
+
 /// Download one file (no archive) to `dest`, checked against its SHA-256 first.
 pub fn fetch_file(url: &str, sha256: &str, dest: &Path) -> Result<(), String> {
     let dir = dest.parent().ok_or("no folder")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let part = dest.with_extension("part");
-    let out = hidden(&system_tool("curl"))
-        .args(["-fsSL", "--retry", "2", "--connect-timeout", "15", "-o"])
-        .arg(&part)
-        .arg(url)
-        .output()
-        .map_err(|e| format!("curl: {e}"))?;
-    if !out.status.success() {
-        let _ = std::fs::remove_file(&part);
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
+    curl(url, &part)?;
     let hash = sha256_hex(&part)?;
     if hash != sha256 {
         let _ = std::fs::remove_file(&part);
@@ -62,16 +78,7 @@ pub fn fetch_file(url: &str, sha256: &str, dest: &Path) -> Result<(), String> {
 pub fn fetch_unpacked(url: &str, sha256: &str, dir: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let archive = dir.join("download.part");
-    let out = hidden(&system_tool("curl"))
-        .args(["-fsSL", "--retry", "2", "--connect-timeout", "15", "-o"])
-        .arg(&archive)
-        .arg(url)
-        .output()
-        .map_err(|e| format!("curl: {e}"))?;
-    if !out.status.success() {
-        let _ = std::fs::remove_file(&archive);
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
+    curl(url, &archive)?;
     let hash = sha256_hex(&archive)?;
     if hash != sha256 {
         let _ = std::fs::remove_file(&archive);

@@ -82,6 +82,10 @@ pub(super) struct LspState {
     pub completions: Option<LspCompletionCache>,
     pub completion_task: Option<Task<()>>,
     pub completion_seq: u64,
+    /// Word start of the completion request in flight: typing on in that word waits for it
+    /// (and asks again once it is back) instead of queueing a request per key.
+    pub completion_inflight: Option<usize>,
+    pub completion_again: bool,
     pub subs: Vec<Subscription>,
 }
 
@@ -114,6 +118,8 @@ impl LspState {
             completions: None,
             completion_task: None,
             completion_seq: 0,
+            completion_inflight: None,
+            completion_again: false,
             subs: Vec::new(),
         }
     }
@@ -453,6 +459,12 @@ impl Editor {
         self.lsp_flush();
         let pos = self.sel.head;
         let word_start = self.word_start_before(pos);
+        // Slow servers (csharp-ls, jdtls) answer every key with the full list: one request at
+        // a time per word, the list filtered here meanwhile.
+        if trigger.is_none() && self.lsp.completion_inflight == Some(word_start) {
+            self.lsp.completion_again = true;
+            return;
+        }
         let Some(mut params) = self.pos_params(pos) else { return };
         params["context"] = match trigger {
             Some(ch) => json!({ "triggerKind": 2, "triggerCharacter": ch.to_string() }),
@@ -461,15 +473,31 @@ impl Editor {
         self.lsp.completion_seq += 1;
         let seq = self.lsp.completion_seq;
         let explicit = trigger.is_some();
+        self.lsp.completion_inflight = Some(word_start);
+        self.lsp.completion_again = false;
         self.lsp.completion_task = Some(cx.spawn(async move |this, cx| {
-            let Ok(result) = client.request("textDocument/completion", params).await else { return };
-            let (incomplete, items) = cx.background_spawn(async move { model::parse_completions(&result) }).await;
+            let result = client.request("textDocument/completion", params).await;
+            let parsed = match result {
+                Ok(result) => Some(cx.background_spawn(async move { model::parse_completions(&result) }).await),
+                Err(_) => None,
+            };
             this.update(cx, |e, cx| {
                 if e.lsp.completion_seq != seq {
                     return;
                 }
+                e.lsp.completion_inflight = None;
+                let again = std::mem::take(&mut e.lsp.completion_again);
+                let Some((incomplete, items)) = parsed else { return };
+                if e.word_start_before(e.sel.head) != word_start {
+                    return;
+                }
                 e.lsp.completions = Some(LspCompletionCache { word_start, incomplete, items: Arc::new(items) });
                 e.rebuild_completion(explicit, cx);
+                // Typed on meanwhile: the list was filtered here; a list the server marked
+                // incomplete is asked for again with the current prefix.
+                if again && incomplete && e.completion.is_some() {
+                    e.request_lsp_completion(None, cx);
+                }
             })
             .ok();
         }));

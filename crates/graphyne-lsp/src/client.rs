@@ -46,6 +46,12 @@ pub struct LspClient {
     alive: Arc<AtomicBool>,
 }
 
+/// `GRAPHYNE_LSP_TRACE=1`: every message to and from language servers on stderr.
+fn trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("GRAPHYNE_LSP_TRACE").is_some())
+}
+
 fn read_message(reader: &mut impl BufRead) -> Result<Option<Value>> {
     let mut content_length: Option<usize> = None;
     loop {
@@ -72,9 +78,10 @@ fn read_message(reader: &mut impl BufRead) -> Result<Option<Value>> {
 impl LspClient {
     /// Spawn the server process and its I/O threads. Blocking (process creation):
     /// call from a background executor.
-    pub fn spawn(name: &str, program: &Path, args: &[&str], root: &Path) -> Result<Arc<Self>> {
+    pub fn spawn(name: &str, launch: &crate::servers::Launch, root: &Path) -> Result<Arc<Self>> {
+        let program = &launch.program;
         let mut cmd = Command::new(program);
-        cmd.args(args).current_dir(root).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.args(&launch.args).envs(launch.env.iter().map(|(k, v)| (k, v))).current_dir(root).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -92,8 +99,12 @@ impl LspClient {
 
         let label = name.to_string();
         std::thread::Builder::new().name(format!("lsp-{label}-write")).spawn(move || {
+            let trace = trace_enabled();
             for msg in out_rx.iter() {
                 let Ok(body) = serde_json::to_string(&msg) else { continue };
+                if trace {
+                    eprintln!("lsp -> {body}");
+                }
                 if write!(stdin, "Content-Length: {}\r\n\r\n{}", body.len(), body).and_then(|_| stdin.flush()).is_err() {
                     break;
                 }
@@ -102,7 +113,11 @@ impl LspClient {
 
         let label = name.to_string();
         std::thread::Builder::new().name(format!("lsp-{label}-stderr")).spawn(move || {
+            let trace = trace_enabled();
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if trace {
+                    eprintln!("lsp stderr [{label}] {line}");
+                }
                 log::debug!("[{label}] {line}");
             }
         })?;
@@ -117,7 +132,12 @@ impl LspClient {
                 let mut reader = BufReader::new(stdout);
                 loop {
                     let msg = match read_message(&mut reader) {
-                        Ok(Some(m)) => m,
+                        Ok(Some(m)) => {
+                            if trace_enabled() {
+                                eprintln!("lsp <- {m}");
+                            }
+                            m
+                        }
                         Ok(None) => break,
                         Err(e) => {
                             log::warn!("[{label}] protocol error: {e:#}");
@@ -247,11 +267,18 @@ impl LspClient {
         self.pending.lock().insert(id, stx);
         let sent = self.tx.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).is_ok();
         let method = method.to_string();
+        // Dropped before the answer (a newer completion replaced it, the editor closed): the
+        // server is told to stop working on it.
+        let guard = CancelOnDrop { id, tx: self.tx.clone(), pending: self.pending.clone(), armed: sent };
         async move {
+            // The whole guard (a closure would capture only `guard.armed`).
+            let mut guard = guard;
             if !sent {
                 return Err(anyhow!("language server is not running"));
             }
-            match srx.recv_async().await {
+            let answer = srx.recv_async().await;
+            guard.armed = false;
+            match answer {
                 Ok(Ok(v)) => Ok(v),
                 Ok(Err(e)) => Err(anyhow!("{method}: {e}")),
                 Err(_) => Err(anyhow!("{method}: no response")),
@@ -335,8 +362,24 @@ impl LspClient {
 
     /// Graceful shutdown (fire and forget); the process is killed on drop anyway.
     pub fn shutdown(&self) {
-        let _ = self.request("shutdown", Value::Null);
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let _ = self.tx.send(json!({ "jsonrpc": "2.0", "id": id, "method": "shutdown", "params": Value::Null }));
         self.notify("exit", Value::Null);
+    }
+}
+
+struct CancelOnDrop {
+    id: i64,
+    tx: flume::Sender<Value>,
+    pending: Pending,
+    armed: bool,
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if self.armed && self.pending.lock().remove(&self.id).is_some() {
+            let _ = self.tx.send(json!({ "jsonrpc": "2.0", "method": "$/cancelRequest", "params": { "id": self.id } }));
+        }
     }
 }
 

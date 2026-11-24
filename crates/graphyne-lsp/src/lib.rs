@@ -4,6 +4,7 @@
 //!   correlation through `flume` one-shot channels (awaitable from any executor), automatic
 //!   replies to server→client requests, and a stream of [`ServerEvent`]s.
 //! * [`servers`]  — the language → language-server matrix and executable discovery.
+//! * [`managed`]  — servers Graphyne installs itself, on request, into its own folder.
 //! * [`convert`]  — `file://` URIs ⇄ paths, LSP positions (UTF-16) ⇄ rope char indices.
 //! * [`model`]    — lenient parsing of server responses into small, UI-friendly types.
 //! * [`snippet`]  — LSP snippet syntax → plain text + caret / placeholder selection.
@@ -12,6 +13,7 @@
 
 pub mod client;
 pub mod convert;
+pub mod managed;
 pub mod model;
 pub mod servers;
 pub mod snippet;
