@@ -43,7 +43,8 @@ single portable `.exe`.
 - **Run anything with one key** — `Shift+F10` runs the current file in ~20 languages; HTML gets a
   live-reloading preview.
 - **Real debugger** — breakpoints, conditions, logpoints, inline values, variables and an
-  evaluation console over the Debug Adapter Protocol, for Python and JavaScript / TypeScript.
+  evaluation console over the Debug Adapter Protocol, for 13 languages: Python, JavaScript /
+  TypeScript, Rust, C / C++, Go, Java, Kotlin, Scala, C#, PHP, Ruby, Lua and Dart.
 - **Zero-setup Python** — create a `.py` file and Graphyne makes a `.venv` with `debugpy` in it,
   so Run and Debug just work. No Python on the computer? Graphyne offers to install one.
 - **Tells you what's missing** — no `g++`, no JDK, no Go? Graphyne says what to install instead of
@@ -106,8 +107,10 @@ single portable `.exe`.
   per project), step over / into / out, pause, restart, **inline variable values**, call stack,
   variables tree and an evaluation console. The program runs in a terminal tab, so it can read input.
 - **Debuggers install themselves** on the first debug session (debugpy, js-debug, CodeLLDB,
-  Delve); the language itself must be installed — Node.js, Rust, `gcc` / `g++`, Go — and when it
-  isn't, Debug says what to get and where. Python is the exception: Graphyne installs it.
+  Delve, netcoredbg, Xdebug, lua-debug) or are built into Graphyne (the JVM debugger for Java,
+  Kotlin and Scala; the bridge to Xdebug for PHP); the language itself must be installed —
+  Node.js, Rust, `gcc` / `g++`, Go, a JDK, .NET, PHP, Ruby, Dart — and when it isn't, Debug says
+  what to get and where. Python and Lua are the exceptions: Graphyne brings them.
 - **Python** via `debugpy` — fully supported and tested. With an interpreter whose environment
   has no debugpy (a system Python, conda, Poetry…), Graphyne uses its own copy, installed once
   per Python version into its folder: nothing is installed into that environment. With no Python
