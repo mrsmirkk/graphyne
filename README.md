@@ -134,6 +134,12 @@ single portable `.exe`.
   console. If `dlv` isn't installed, Graphyne builds it once with `go install` (the Go toolchain
   checks the download) into its own folder. The debug build goes to the temp folder, not
   `__debug_bin` in the project.
+- **Java** via Graphyne's own JVM debugger (it speaks the JVM's debug protocol, JDWP; nothing to
+  download) — tested with JDK 25: the file and the sources of its package tree are compiled with
+  `javac -g`, the program runs in a terminal tab. Breakpoints with conditions and logpoints,
+  stepping into methods, inline values, records, collections and maps shown by their contents
+  (`{a=[1], b=[2, 3]}`), and expressions in the console: variables, fields, `[index]`, methods
+  without arguments, arithmetic and comparisons (`point.x * point.y + items.size()`).
 - **Dart** via the Dart SDK's own debugger (`dart debug_adapter`) — tested with Dart 3.14:
   breakpoints, stepping into functions, inline values, objects and maps, Dart expressions in the
   console. The program runs in a terminal tab, so it can read input. The SDK's language server

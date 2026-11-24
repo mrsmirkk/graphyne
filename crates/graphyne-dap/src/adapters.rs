@@ -44,6 +44,149 @@ fn need(program: &'static str, lang: LanguageId) -> Result<PathBuf, String> {
     })
 }
 
+/// A folder in the temp directory for one file's debug build (emptied first).
+fn build_dir(kind: &str, file: &Path) -> Result<PathBuf, String> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    file.hash(&mut h);
+    let dir = std::env::temp_dir().join(format!("graphyne-debug-{kind}")).join(format!("{:016x}", h.finish()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// The compiler's errors, at most 12 lines.
+fn compile_errors(tool: &str, out: &std::process::Output) -> String {
+    let all = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let lines: Vec<&str> = all.lines().filter(|l| !l.trim().is_empty()).collect();
+    let errors: Vec<&str> = lines.iter().copied().filter(|l| l.contains("error")).take(12).collect();
+    let shown = if errors.is_empty() { lines.iter().rev().take(12).rev().copied().collect::<Vec<_>>().join("\n") } else { errors.join("\n") };
+    format!("{tool} failed:\n{shown}")
+}
+
+/// `package a.b;` (Java, Kotlin, Scala) at the top of a file.
+fn source_package(text: &str) -> Option<String> {
+    text.lines().map(str::trim).find(|l| l.starts_with("package ")).map(|l| l["package ".len()..].trim().trim_end_matches(';').trim().to_string()).filter(|p| !p.is_empty())
+}
+
+/// A JVM program for Graphyne's own debugger (`bridge::jvm`): the `java` command it runs in a
+/// terminal tab under JDWP, and where its sources are.
+fn jvm(title: &str, command: Vec<String>, cwd: &Path, source_roots: Vec<PathBuf>, root: &Path, adapter_id: &'static str) -> Result<Resolved, String> {
+    let me = std::env::current_exe().map_err(|e| format!("Graphyne's own path: {e}"))?;
+    Ok(Resolved {
+        name: "jvm",
+        adapter_id,
+        program: me,
+        args: vec![crate::bridge::ARG.into(), "jvm".into()],
+        env: Vec::new(),
+        transport: Transport::Stdio,
+        cwd: cwd.to_path_buf(),
+        launch: json!({ "type": "jvm", "request": "launch", "name": format!("Graphyne: {title}"), "command": command, "cwd": cwd, "sourceRoots": source_roots, "project": root }),
+    })
+}
+
+/// Java: the file and the sources it uses (`-sourcepath`, its package's root folder) built
+/// with `javac -g` into the temp folder.
+fn java(file: &Path, dir: &Path, title: &str, root: &Path, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
+    let java = need("java", LanguageId::Java)?;
+    let next_to_java = java.parent().map(|d| d.join(if cfg!(windows) { "javac.exe" } else { "javac" })).filter(|p| p.is_file());
+    let javac = next_to_java
+        .or_else(|| graphyne_core::toolchain::find("javac"))
+        .ok_or("javac isn't installed (only a JRE, without the compiler): install a JDK, e.g. from adoptium.net")?;
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let package = source_package(&text);
+    let depth = package.as_deref().map(|p| p.split('.').count()).unwrap_or(0);
+    let source_root = (0..depth).try_fold(dir.to_path_buf(), |d, _| d.parent().map(Path::to_path_buf)).unwrap_or_else(|| dir.to_path_buf());
+    let out = build_dir("java", file)?;
+    progress("Compiling with javac…");
+    let result = hidden_command(&javac.to_string_lossy())
+        .args(["-g", "-encoding", "UTF-8", "-d"])
+        .arg(&out)
+        .arg("-sourcepath")
+        .arg(&source_root)
+        .arg(file)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("javac: {e}"))?;
+    if !result.status.success() {
+        return Err(compile_errors("javac", &result));
+    }
+    let stem = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let main = match &package {
+        Some(p) => format!("{p}.{stem}"),
+        None => stem,
+    };
+    let command = vec![java.to_string_lossy().to_string(), "-cp".into(), out.to_string_lossy().to_string(), main];
+    jvm(title, command, dir, vec![source_root, dir.to_path_buf()], root, "java")
+}
+
+/// The JVM class Kotlin puts a file's top-level functions in: `main.kt` → `MainKt`, or the
+/// name given with `@file:JvmName("…")`.
+fn kotlin_file_class(file: &Path, text: &str) -> String {
+    if let Some(rest) = text.lines().map(str::trim).find_map(|l| l.strip_prefix("@file:JvmName(\"")) {
+        if let Some(name) = rest.split('"').next() {
+            return name.to_string();
+        }
+    }
+    let stem = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let mut chars = stem.chars();
+    let first = chars.next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
+    let rest: String = chars.map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' }).collect();
+    format!("{first}{rest}Kt")
+}
+
+/// Kotlin: the file compiled with `kotlinc` into a jar with Kotlin's runtime, run with `java`.
+fn kotlin(file: &Path, dir: &Path, title: &str, root: &Path, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
+    let kotlinc = need("kotlinc", LanguageId::Kotlin)?;
+    let java = need("java", LanguageId::Kotlin)?;
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let out = build_dir("kotlin", file)?;
+    let jar = out.join("app.jar");
+    progress("Compiling with kotlinc…");
+    let result = hidden_command(&kotlinc.to_string_lossy())
+        .arg(file)
+        .args(["-include-runtime", "-d"])
+        .arg(&jar)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("kotlinc: {e}"))?;
+    if !result.status.success() || !jar.is_file() {
+        return Err(compile_errors("kotlinc", &result));
+    }
+    let class = kotlin_file_class(file, &text);
+    let main = match source_package(&text) {
+        Some(p) => format!("{p}.{class}"),
+        None => class,
+    };
+    let command = vec![java.to_string_lossy().to_string(), "-cp".into(), jar.to_string_lossy().to_string(), main];
+    jvm(title, command, dir, vec![dir.to_path_buf()], root, "kotlin")
+}
+
+/// Scala through scala-cli: it compiles the file and prints the `java` command that runs it
+/// (`--command`); Graphyne runs that under its debugger.
+fn scala(file: &Path, dir: &Path, title: &str, root: &Path, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
+    let scala_cli = need("scala-cli", LanguageId::Scala)?;
+    progress("Compiling with scala-cli…");
+    // No build server left running (Bloop): compile in this process.
+    let result = hidden_command(&scala_cli.to_string_lossy())
+        .args(["run", "--server=false", "--command"])
+        .arg(file)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("scala-cli: {e}"))?;
+    if !result.status.success() {
+        return Err(compile_errors("scala-cli", &result));
+    }
+    let command: Vec<String> = String::from_utf8_lossy(&result.stdout).lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
+    if command.first().is_none_or(|j| !j.to_lowercase().contains("java")) {
+        return Err(format!("scala-cli didn't print the java command: {}", command.join(" ")));
+    }
+    jvm(title, command, dir, vec![dir.to_path_buf()], root, "scala")
+}
+
 /// Dart through the SDK's own debug adapter (`dart debug_adapter`). The program runs in a
 /// terminal tab (`console: terminal` → runInTerminal), from its package folder.
 fn dart(file: &Path, dir: &Path, title: &str, root: &Path) -> Result<Resolved, String> {
@@ -246,6 +389,9 @@ pub fn resolve_with_progress(file: &Path, root: &Path, progress: &dyn Fn(&str)) 
         LanguageId::Php => php(file, &dir, &title, progress),
         LanguageId::CSharp => csharp(file, &dir, &title, root, progress),
         LanguageId::Dart => dart(file, &dir, &title, root),
+        LanguageId::Java => java(file, &dir, &title, root, progress),
+        LanguageId::Kotlin => kotlin(file, &dir, &title, root, progress),
+        LanguageId::Scala => scala(file, &dir, &title, root, progress),
         other => Err(format!("No debugger configured for {} yet", other.name())),
     }
 }

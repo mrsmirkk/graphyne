@@ -1,9 +1,11 @@
 //! Debug adapters Graphyne implements itself, for debug engines that speak their own protocol
-//! instead of DAP: Xdebug (PHP, DBGp). Graphyne starts itself as `graphyne --dap-bridge <kind>`
+//! instead of DAP: Xdebug (PHP, DBGp) and the JVM (Java, Kotlin, Scala; JDWP). Graphyne starts itself as `graphyne --dap-bridge <kind>`
 //! and the bridge speaks DAP on stdin / stdout like any other adapter, so the client side is
 //! the same for every language.
 
 pub mod dbgp;
+pub mod jdwp;
+pub mod jvm;
 
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -23,6 +25,7 @@ pub fn serve_if_asked() -> bool {
     let kind = args.next().unwrap_or_default();
     let result = match kind.as_str() {
         "php" => dbgp::serve(),
+        "jvm" => jvm::serve(),
         other => Err(format!("no debug bridge called \u{201C}{other}\u{201D}")),
     };
     if let Err(e) = result {
