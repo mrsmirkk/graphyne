@@ -140,6 +140,9 @@ single portable `.exe`.
   stepping into methods, inline values, records, collections and maps shown by their contents
   (`{a=[1], b=[2, 3]}`), and expressions in the console: variables, fields, `[index]`, methods
   without arguments, arithmetic and comparisons (`point.x * point.y + items.size()`).
+- **Kotlin** with the same JVM debugger — tested with Kotlin 2.4: the file is compiled with
+  `kotlinc` (with Kotlin's runtime) and debugged like Java; data classes, Kotlin collections and
+  properties (`point.x`, `items.size`) in the console.
 - **Dart** via the Dart SDK's own debugger (`dart debug_adapter`) — tested with Dart 3.14:
   breakpoints, stepping into functions, inline values, objects and maps, Dart expressions in the
   console. The program runs in a terminal tab, so it can read input. The SDK's language server

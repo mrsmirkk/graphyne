@@ -101,6 +101,8 @@ struct Session {
     locals: HashMap<(u64, u64), Option<Vec<Local>>>,
     superclass: HashMap<u64, u64>,
     step: Option<i32>,
+    /// Steps taken on their own past code without a line number (a stop there means nothing).
+    extra_steps: u32,
     thread: Option<u64>,
     frames: Vec<(u64, u64, Location)>,
     refs: Vec<VarRef>,
@@ -136,6 +138,7 @@ pub fn serve() -> Result<(), String> {
         locals: HashMap::new(),
         superclass: HashMap::new(),
         step: None,
+        extra_steps: 0,
         thread: None,
         frames: Vec::new(),
         refs: Vec::new(),
@@ -576,6 +579,15 @@ impl Session {
                 }
             }
         }
+        // Code with no line (Kotlin's parameter checks at a function's start): step on to a line.
+        if kind == event::SINGLE_STEP && self.extra_steps < 20 && self.line_of(&loc) == 0 {
+            self.extra_steps += 1;
+            // One instruction at a time: a line step would skip the line these belong to.
+            if self.step_by(0, 1).is_ok() {
+                return;
+            }
+        }
+        self.extra_steps = 0;
         let reason = if kind == event::BREAKPOINT { "breakpoint" } else { "step" };
         self.dap.event("stopped", json!({ "reason": reason, "threadId": thread as i64, "allThreadsStopped": true }));
     }
@@ -1209,6 +1221,10 @@ impl Session {
             let sig = self.signature(loc.class);
             let method = self.methods(loc.class).into_iter().find(|m| m.id == loc.method).map(|m| m.name).unwrap_or_else(|| "?".into());
             let line = self.line_of(&loc);
+            // Generated code with no line (Kotlin's `main(String[])` calling `main()`).
+            if i > 0 && line == 0 {
+                continue;
+            }
             let class_name = jdwp::type_name(&sig);
             let mut frame = json!({ "id": i + 1, "name": format!("{}.{method}", jdwp::simple_name(&class_name)), "line": line, "column": 1 });
             let path = match self.classes.get(&loc.class).and_then(|c| c.path.clone()) {
@@ -1253,8 +1269,13 @@ impl Session {
     }
 
     fn step(&mut self, depth: i32) -> Result<(), String> {
+        self.step_by(1, depth)
+    }
+
+    /// A step request: `size` 1 = to the next line, 0 = one instruction.
+    fn step_by(&mut self, size: i32, depth: i32) -> Result<(), String> {
         let thread = self.thread.ok_or("the program isn't stopped")?;
-        let mut w = self.w().u8(event::SINGLE_STEP).u8(2).i32(1 + LIBRARY.len() as i32).u8(10).object(thread).i32(1).i32(depth);
+        let mut w = self.w().u8(event::SINGLE_STEP).u8(2).i32(1 + LIBRARY.len() as i32).u8(10).object(thread).i32(size).i32(depth);
         for pattern in LIBRARY {
             w = w.u8(6).string(pattern);
         }
