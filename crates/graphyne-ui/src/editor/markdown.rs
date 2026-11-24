@@ -178,10 +178,14 @@ pub fn parse(md: &str) -> Vec<MdBlock> {
         let trimmed = line.trim_start();
         if let Some(tag) = trimmed.strip_prefix("```") {
             flush(&mut para, &mut blocks);
-            let lang = fence_language(tag);
+            // A fence may be longer than three backticks (the Kotlin server sends four); it
+            // closes with at least as many.
+            let fence = 3 + tag.chars().take_while(|c| *c == '`').count();
+            let lang = fence_language(tag.trim_start_matches('`'));
             let mut code = String::new();
             for l in lines.by_ref() {
-                if l.trim_start().starts_with("```") {
+                let t = l.trim_start();
+                if t.chars().take_while(|c| *c == '`').count() >= fence {
                     break;
                 }
                 code.push_str(l);
@@ -259,6 +263,16 @@ mod tests {
             _ => panic!(),
         }
         assert!(matches!(&blocks[3], MdBlock::Para { bullet: true, .. }));
+    }
+
+    #[test]
+    fn long_fences() {
+        let blocks = parse("````kotlin
+fun greet(name: String): String
+````
+");
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(&blocks[0], MdBlock::Code { text, highlights } if text.as_ref() == "fun greet(name: String): String" && !highlights.is_empty()));
     }
 
     #[test]

@@ -33,7 +33,7 @@ fn main() -> anyhow::Result<()> {
     let root = PathBuf::from(&args[2]);
     let file = PathBuf::from(&args[3]);
     let (line, col): (u32, u32) = (args[4].parse()?, args[5].parse()?);
-    let launch = graphyne_lsp::servers::Launch { program: server, args: args.iter().skip(6).cloned().collect(), env: Vec::new() };
+    let launch = graphyne_lsp::servers::Launch { program: server, args: args.iter().skip(6).cloned().collect(), env: Vec::new(), init_options: None };
     let t = Instant::now();
     let client = LspClient::spawn(&args[1], &launch, &root)?;
     block_on(client.clone().initialize())?;

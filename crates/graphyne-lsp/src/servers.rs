@@ -159,6 +159,8 @@ pub struct Launch {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// `initializationOptions` for `initialize`.
+    pub init_options: Option<serde_json::Value>,
 }
 
 /// First installed server for a language: one on PATH (the user's own) wins over the copy
@@ -167,7 +169,7 @@ pub fn find(lang: LanguageId, root: &Path) -> Result<(&'static ServerSpec, Launc
     let specs = specs_for(lang);
     for spec in specs {
         if let Some(path) = which(spec.program) {
-            return Ok((spec, Launch { program: path, args: spec.args.iter().map(|a| a.to_string()).collect(), env: Vec::new() }));
+            return Ok((spec, Launch { program: path, args: spec.args.iter().map(|a| a.to_string()).collect(), env: Vec::new(), init_options: None }));
         }
     }
     for spec in specs {

@@ -25,6 +25,13 @@
   `rust-analyzer`, `pyright-langserver` (или `basedpyright`, `pylsp`), `gopls`, `clangd`,
   `vtsls` / `typescript-language-server`, `lua-language-server` и т.д. Без сервера работают
   подсветка синтаксиса и автодополнение по словам из файла.
+- **PHP, Ruby, C#, Java, Kotlin, Scala** — сервер ставится в один клик: при открытии файла
+  Graphyne предлагает карточку «Code insight for …» (или щёлкните по значку ⚡). Сервер кладётся
+  в папку Graphyne (`%APPDATA%\Graphyne\lsp`), не в глобальные npm / gem / dotnet. Нужен сам язык:
+  PHP — Node.js (intelephense, ~150 МБ); Ruby — Ruby (Ruby LSP, ~5 МБ); C# — .NET SDK 8–11
+  (csharp-ls, ~100 МБ); Java — Java 21+ (Eclipse JDT LS, 50 МБ); Kotlin — ничего (сервер JetBrains
+  со своей Java, 370 МБ загрузки, 1,2 ГБ на диске); Scala — Java 17+ (Metals, ~180 МБ). Свой сервер
+  в `PATH` всегда важнее.
 - **Python** — если его нет на компьютере, Run / Debug предложат **Install Python 3.13** (через uv,
   около 30 МБ, без записи в PATH и реестр). Когда в проекте появляется `.py`-файл (или при
   первом Run / Debug), Graphyne сам создаёт `.venv` и ставит туда `debugpy`. Если выбран

@@ -112,13 +112,13 @@ pub fn launch(server: &str, root: &Path) -> Option<Launch> {
     if !dir.join(MARKER).is_file() {
         return None;
     }
-    let plain = |program: PathBuf, args: Vec<String>| Some(Launch { program, args, env: Vec::new() });
+    let plain = |program: PathBuf, args: Vec<String>| Some(Launch { program, args, env: Vec::new(), init_options: None });
     match server {
         "intelephense" => {
             let script = dir.join("node_modules").join("intelephense").join("lib").join("intelephense.js");
             plain(find("node")?, vec![path_arg(&script), "--stdio".into()])
         }
-        "ruby-lsp" => Some(Launch { program: find("ruby")?, args: vec![path_arg(&dir.join("bin").join("ruby-lsp"))], env: ruby_env(&dir) }),
+        "ruby-lsp" => Some(Launch { program: find("ruby")?, args: vec![path_arg(&dir.join("bin").join("ruby-lsp"))], env: ruby_env(&dir), init_options: None }),
         "csharp-ls" => plain(dir.join(exe("csharp-ls")), Vec::new()),
         "jdtls" => {
             let java = find("java")?;
@@ -157,10 +157,19 @@ pub fn launch(server: &str, root: &Path) -> Option<Launch> {
             plain(java, args)
         }
         "kotlin-lsp" => {
-            let system = graphyne_core::session::project_data_dir(root)?.join("kotlin-lsp");
-            plain(dir.join("bin").join(exe("intellij-server")), vec!["--stdio".into(), "--data-sharing=none".into(), format!("--system-path={}", path_arg(&system))])
+            let data = graphyne_core::session::project_data_dir(root)?.join("kotlin-lsp");
+            let args = vec!["--stdio".into(), "--data-sharing=none".into(), format!("--system-path={}", path_arg(&data.join("system")))];
+            // Its index goes to the user's caches folder unless the client names one.
+            let init_options = Some(serde_json::json!({ "indexDir": path_arg(&data.join("index")) }));
+            Some(Launch { program: dir.join("bin").join(exe("intellij-server")), args, env: Vec::new(), init_options })
         }
-        "metals" => plain(find("java")?, vec![format!("@{}", path_arg(&dir.join("metals.args")))]),
+        // Metals fetches compiler parts while it runs: into its own cache too.
+        "metals" => Some(Launch {
+            program: find("java")?,
+            args: vec![format!("@{}", path_arg(&dir.join("metals.args")))],
+            env: vec![("COURSIER_CACHE".into(), path_arg(&dir.join("cache")))],
+            init_options: None,
+        }),
         _ => None,
     }
 }

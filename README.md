@@ -49,6 +49,8 @@ single portable `.exe`.
   so Run and Debug just work. No Python on the computer? Graphyne offers to install one.
 - **Tells you what's missing** — no `g++`, no JDK, no Go? Graphyne says what to install instead of
   failing in the terminal.
+- **Code insight in one click** — open a PHP, Ruby, C#, Java, Kotlin or Scala file without a
+  language server and Graphyne offers to install one into its own folder.
 - **Git, the visual way** — branch graph, side-by-side diffs with word-level highlights, and
   commits of selected changes only.
 - **Databases built in** — SQLite, PostgreSQL and MySQL / MariaDB: a schema browser, an SQL
@@ -88,8 +90,29 @@ single portable `.exe`.
   (`Ctrl+B`, `F12`, `Ctrl+click`), parameter info (`Ctrl+P`), quick fixes with preview
   (`Alt+Enter`), inlay hints and usage counts, with incremental document sync.
 - Language servers are found on `PATH` automatically: `rust-analyzer`, `pyright` / `basedpyright` /
-  `pylsp`, `gopls`, `clangd`, `vtsls` / `typescript-language-server`, `lua-language-server` and more.
-  Without one, Graphyne still highlights and completes words from the file.
+  `pylsp`, `gopls`, `clangd`, `vtsls` / `typescript-language-server`, `lua-language-server`,
+  `dart language-server` and more. Without one, Graphyne still highlights and completes words from
+  the file.
+- **One-click install** for languages whose server rarely comes with the toolchain: open a file and
+  a card offers it (or click the ⚡ Smart Mode icon). Graphyne puts the server in its own folder
+  (`%APPDATA%\Graphyne\lsp`), not in your global npm / gem / dotnet setup, with pinned versions
+  and checked downloads. A server you installed yourself on `PATH` always wins.
+
+  | Language | Server | Needs | Size |
+  |---|---|---|---|
+  | PHP | intelephense | Node.js | ~150 MB |
+  | Ruby | Ruby LSP | Ruby (3.4+ needs no compiler) | ~5 MB |
+  | C# | csharp-ls (the version that matches your .NET SDK, 8–11) | .NET SDK | ~100 MB |
+  | Java | Eclipse JDT Language Server | Java 21+ | 50 MB download |
+  | Kotlin | JetBrains Kotlin LSP (brings its own Java) | — (Windows x64) | 370 MB download, 1.2 GB |
+  | Scala | Metals | Java 17+ | ~180 MB |
+
+  Notes: the Kotlin server knows the standard library only in Gradle / Maven projects; Metals keeps
+  `.metals/` in the project (as it does in any editor) and works best with a build (scala-cli,
+  sbt, Mill) — single files get types and signatures without one. Ruby LSP doesn't index methods
+  defined outside a class.
+- Slow servers stay responsive: one completion request at a time per word, requests that are no
+  longer needed are cancelled (`$/cancelRequest`). `GRAPHYNE_LSP_TRACE=1` logs the traffic.
 
 ### Run
 - **One-click Run** (`Shift+F10`) for Rust (Cargo or single files), C/C++, Python, Go,

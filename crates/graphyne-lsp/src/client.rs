@@ -41,6 +41,7 @@ pub struct LspClient {
     pending: Pending,
     next_id: AtomicI64,
     caps: RwLock<Value>,
+    init_options: Option<Value>,
     events: flume::Receiver<ServerEvent>,
     child: Mutex<Option<Child>>,
     alive: Arc<AtomicBool>,
@@ -246,6 +247,7 @@ impl LspClient {
             pending,
             next_id: AtomicI64::new(1),
             caps: RwLock::new(Value::Null),
+            init_options: launch.init_options.clone(),
             events: ev_rx,
             child: Mutex::new(Some(child)),
             alive,
@@ -298,7 +300,7 @@ impl LspClient {
     pub async fn initialize(self: Arc<Self>) -> Result<()> {
         let root_uri = path_to_uri(&self.root);
         let name = self.root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let params = json!({
+        let mut params = json!({
             "processId": std::process::id(),
             "clientInfo": { "name": "Graphyne", "version": env!("CARGO_PKG_VERSION") },
             "rootUri": root_uri,
@@ -306,6 +308,9 @@ impl LspClient {
             "workspaceFolders": [{ "uri": root_uri, "name": name }],
             "capabilities": client_capabilities(),
         });
+        if let Some(options) = &self.init_options {
+            params["initializationOptions"] = options.clone();
+        }
         let result = self.request("initialize", params).await?;
         *self.caps.write() = result.get("capabilities").cloned().unwrap_or(Value::Null);
         self.notify("initialized", json!({}));
