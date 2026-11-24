@@ -14,7 +14,8 @@ use windows::Win32::{
         },
         Dxgi::{
             CreateDXGIFactory2, DXGI_CREATE_FACTORY_DEBUG, DXGI_CREATE_FACTORY_FLAGS,
-            IDXGIAdapter1, IDXGIFactory6,
+            DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, DXGI_GPU_PREFERENCE_MINIMUM_POWER, IDXGIAdapter1,
+            IDXGIFactory6,
         },
     },
 };
@@ -121,20 +122,73 @@ fn get_dxgi_factory(debug_layer_available: bool) -> Result<IDXGIFactory6> {
     unsafe { Ok(CreateDXGIFactory2(factory_flag)?) }
 }
 
-/// First adapter that supports Direct3D 11, with the device created on it.
+/// Which GPU to render with. Graphyne: a 2D editor doesn't need the discrete GPU of a
+/// hybrid laptop, and creating a device there is the slowest step of start-up (~250 ms to
+/// wake the NVIDIA driver against ~110 ms on the integrated GPU), besides keeping that GPU
+/// awake. So the minimum-power GPU goes first when a display is connected to it (a laptop's
+/// own screen); on desktops, whose monitors hang on the discrete card, the order stays
+/// Windows' own. The high-performance GPU is used when asked for in Windows Settings >
+/// Display > Graphics, or with `GRAPHYNE_GPU=high` (`low` forces the integrated one,
+/// `default` keeps Windows' order).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GpuChoice {
+    Default,
+    MinimumPower,
+    ForcedMinimumPower,
+    HighPerformance,
+}
+
+fn gpu_choice() -> GpuChoice {
+    match std::env::var("GRAPHYNE_GPU").unwrap_or_default().to_ascii_lowercase().as_str() {
+        "high" => return GpuChoice::HighPerformance,
+        "low" => return GpuChoice::ForcedMinimumPower,
+        "default" => return GpuChoice::Default,
+        _ => {}
+    }
+    // Windows Settings > Graphics keeps "GpuPreference=2;" (high performance), "=1;" (power
+    // saving) or "=0;" (let Windows decide) under the program's full path.
+    let preference = std::env::current_exe().ok().and_then(|exe| {
+        let key = windows_registry::CURRENT_USER.open(r"Software\Microsoft\DirectX\UserGpuPreferences").ok()?;
+        key.get_string(exe.to_string_lossy().as_ref()).ok()
+    });
+    match preference.as_deref().and_then(|p| p.split(';').find_map(|kv| kv.trim().strip_prefix("GpuPreference="))) {
+        Some("2") => GpuChoice::HighPerformance,
+        _ => GpuChoice::MinimumPower,
+    }
+}
+
+fn adapter_name(adapter: &IDXGIAdapter1) -> String {
+    unsafe { adapter.GetDesc1() }
+        .map(|desc| String::from_utf16_lossy(&desc.Description).trim_matches(char::from(0)).to_string())
+        .unwrap_or_default()
+}
+
+fn has_outputs(adapter: &IDXGIAdapter1) -> bool {
+    unsafe { adapter.EnumOutputs(0) }.is_ok()
+}
+
+/// The adapters to try, best first.
+fn candidate_adapters(dxgi_factory: &IDXGIFactory6) -> Vec<IDXGIAdapter1> {
+    let first_by = |preference| unsafe { dxgi_factory.EnumAdapterByGpuPreference::<IDXGIAdapter1>(0, preference) }.ok();
+    let mut adapters: Vec<IDXGIAdapter1> = match gpu_choice() {
+        GpuChoice::Default => None,
+        GpuChoice::HighPerformance => first_by(DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE),
+        GpuChoice::ForcedMinimumPower => first_by(DXGI_GPU_PREFERENCE_MINIMUM_POWER),
+        GpuChoice::MinimumPower => first_by(DXGI_GPU_PREFERENCE_MINIMUM_POWER).filter(has_outputs),
+    }
+    .into_iter()
+    .collect();
+    adapters.extend((0..).map_while(|i| unsafe { dxgi_factory.EnumAdapters(i) }.ok().and_then(|a| a.cast::<IDXGIAdapter1>().ok())));
+    adapters
+}
+
+/// The first candidate adapter that supports Direct3D 11, with the device created on it.
 #[inline]
 fn get_adapter(
     dxgi_factory: &IDXGIFactory6,
     debug_layer_available: bool,
 ) -> Result<(IDXGIAdapter1, ID3D11Device, ID3D11DeviceContext, D3D_FEATURE_LEVEL)> {
-    for adapter_index in 0.. {
-        let adapter: IDXGIAdapter1 = unsafe { dxgi_factory.EnumAdapters(adapter_index)?.cast()? };
-        if let Ok(desc) = unsafe { adapter.GetDesc1() } {
-            let gpu_name = String::from_utf16_lossy(&desc.Description)
-                .trim_matches(char::from(0))
-                .to_string();
-            log::info!("Using GPU: {}", gpu_name);
-        }
+    for adapter in candidate_adapters(dxgi_factory) {
         let mut context: Option<ID3D11DeviceContext> = None;
         let mut feature_level = D3D_FEATURE_LEVEL::default();
         if let Some(device) = get_device(
@@ -146,12 +200,12 @@ fn get_adapter(
         .log_err()
         {
             if let Some(context) = context {
+                log::info!("Using GPU: {}", adapter_name(&adapter));
                 return Ok((adapter, device, context, feature_level));
             }
         }
     }
-
-    unreachable!()
+    anyhow::bail!("no GPU supports Direct3D 11")
 }
 
 #[inline]

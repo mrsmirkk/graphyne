@@ -364,6 +364,13 @@ impl WindowsWindow {
         params: WindowParams,
         creation_info: WindowCreationInfo,
     ) -> Result<Self> {
+        let __t0 = std::time::Instant::now();
+        let __trace = std::env::var_os("GRAPHYNE_STARTUP_TRACE").is_some();
+        let __mark = |label: &str| {
+            if __trace {
+                eprintln!("  gpui window: {label:<26} {:>7.1} ms", __t0.elapsed().as_secs_f64() * 1000.0);
+            }
+        };
         let WindowCreationInfo {
             icon,
             executor,
@@ -457,10 +464,14 @@ impl WindowsWindow {
         // so check the inner result first.
         let this = context.inner.take().unwrap()?;
         let hwnd = creation_result?;
+        __mark("CreateWindowExW");
 
         register_drag_drop(&this)?;
+        __mark("register_drag_drop");
         configure_dwm_dark_mode(hwnd, appearance);
+        __mark("dark mode");
         this.state.borrow_mut().border_offset.update(hwnd)?;
+        __mark("border offset");
         let placement = retrieve_window_placement(
             hwnd,
             display,
@@ -468,6 +479,7 @@ impl WindowsWindow {
             this.state.borrow().scale_factor,
             this.state.borrow().border_offset,
         )?;
+        __mark("retrieve placement");
         if params.show {
             unsafe { SetWindowPlacement(hwnd, &placement)? };
         } else {
@@ -476,6 +488,7 @@ impl WindowsWindow {
                 state: WindowOpenState::Windowed,
             });
         }
+        __mark("placement");
 
         Ok(Self(this))
     }

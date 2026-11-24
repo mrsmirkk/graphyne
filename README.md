@@ -322,7 +322,6 @@ single portable `.exe`.
 Planned, roughly in this order:
 
 - [ ] **macOS and Linux** builds (GPUI supports both; Graphyne isn't tested there yet).
-- [ ] **Faster start-up** — most of today's ~0.4 s goes to Direct3D initialization.
 - [ ] An extension gallery (install from a URL).
 
 Have an idea? Open an issue.
@@ -342,6 +341,13 @@ You can also start it with a folder: `graphyne.exe "C:\path\to\project"`, or dro
 used when installed (otherwise Cascadia Mono / Segoe UI). For language features, run and debug,
 install the toolchains you use (Python, Rust, Node.js, …) and their language servers — Graphyne
 tells you when something is missing.
+
+**Start-up and the GPU:** on a laptop with two GPUs Graphyne draws with the integrated one when
+the screen is connected to it: the window is up in about 0.2 s instead of 0.45 s (waking the
+discrete GPU's driver is the slowest part of starting), and the discrete GPU can stay asleep. To
+use the discrete GPU, choose **High performance** for `graphyne.exe` in Windows Settings →
+Display → Graphics, or set `GRAPHYNE_GPU=high` (`low` forces the integrated GPU, `default` keeps
+Windows' order). `GRAPHYNE_STARTUP_TRACE=1` prints where start-up time goes.
 
 ## Keyboard shortcuts
 

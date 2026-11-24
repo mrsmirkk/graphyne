@@ -132,17 +132,28 @@ impl DirectXRenderer {
         if disable_direct_composition {
             log::info!("Direct Composition is disabled.");
         }
+        let __t0 = std::time::Instant::now();
+        let __trace = std::env::var_os("GRAPHYNE_STARTUP_TRACE").is_some();
+        let __mark = |label: &str| {
+            if __trace {
+                eprintln!("  gpui renderer: {label:<24} {:>7.1} ms", __t0.elapsed().as_secs_f64() * 1000.0);
+            }
+        };
 
         let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
             .context("Creating DirectX devices")?;
         let atlas = Arc::new(DirectXAtlas::new(&devices.device, &devices.device_context));
+        __mark("devices + atlas");
 
         let resources = DirectXResources::new(&devices, 1, 1, hwnd, disable_direct_composition)
             .context("Creating DirectX resources")?;
+        __mark("resources (swap chain)");
         let globals = DirectXGlobalElements::new(&devices.device)
             .context("Creating DirectX global elements")?;
+        __mark("globals");
         let pipelines = DirectXRenderPipelines::new(&devices.device)
             .context("Creating DirectX render pipelines")?;
+        __mark("pipelines (shaders)");
 
         let direct_composition = if disable_direct_composition {
             None
@@ -154,6 +165,7 @@ impl DirectXRenderer {
                 .context("Setting swap chain for DirectComposition")?;
             Some(composition)
         };
+        __mark("DirectComposition");
 
         Ok(DirectXRenderer {
             hwnd,
