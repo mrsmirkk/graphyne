@@ -203,8 +203,15 @@ impl Debugger {
                     Some(
                         list.iter()
                             .filter_map(|b| {
-                                let p = Path::new(b["path"].as_str()?);
-                                let path = if p.is_absolute() { p.to_path_buf() } else { root.join(p) };
+                                let saved = b["path"].as_str()?;
+                                let p = Path::new(saved);
+                                // Saved with `/`: rebuilt part by part so the path has the
+                                // system's separators (netcoredbg doesn't match `App/Program.cs`).
+                                let path = if p.is_absolute() {
+                                    p.to_path_buf()
+                                } else {
+                                    saved.split(['/', '\\']).filter(|s| !s.is_empty()).fold(root.clone(), |acc, part| acc.join(part))
+                                };
                                 let line = (b["line"].as_u64()? as usize).checked_sub(1)?;
                                 let field = |k: &str| b[k].as_str().map(str::to_string).filter(|t| !t.is_empty());
                                 Some((path, line, BpOpts { condition: field("condition"), log_message: field("logMessage") }))

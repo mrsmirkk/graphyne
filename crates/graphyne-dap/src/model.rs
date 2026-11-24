@@ -71,7 +71,7 @@ pub fn parse_stack(body: &Value) -> Vec<StackFrame> {
                 .filter_map(|f| {
                     Some(StackFrame {
                         id: f["id"].as_i64()?,
-                        name: f["name"].as_str().unwrap_or("?").to_string(),
+                        name: frame_name(f["name"].as_str().unwrap_or("?")),
                         path: f["source"]["path"].as_str().map(PathBuf::from),
                         line: f["line"].as_u64().unwrap_or(1).saturating_sub(1) as usize,
                         column: f["column"].as_u64().unwrap_or(1).saturating_sub(1) as usize,
@@ -100,9 +100,33 @@ pub fn parse_scopes(body: &Value) -> Vec<Scope> {
 }
 
 /// The interpreter's own bookkeeping, not the program's variables: Lua's loop state
-/// (`(for state #1)`, `(for index)` in older versions) and temporaries.
+/// (`(for state #1)`, `(for index)` in older versions) and temporaries, and the property C#
+/// generates for every record.
 fn internal_variable(name: &str) -> bool {
-    name.starts_with("(for ") || matches!(name, "(temporary)" | "(*temporary)" | "(C temporary)")
+    name.starts_with("(for ") || matches!(name, "(temporary)" | "(*temporary)" | "(C temporary)" | "EqualityContract")
+}
+
+/// A frame name as the source has it: C#'s compiler names (`Program.<<Main>$>g__Greet|0_0()`
+/// for a local function, `Program.<Main>$()` for top-level statements) become `Greet()` and
+/// `Program.Main()`.
+fn frame_name(name: &str) -> String {
+    if let Some(i) = name.find(">g__") {
+        let rest = &name[i + 4..];
+        if let Some(j) = rest.find('|') {
+            let args = rest.find('(').map(|k| &rest[k..]).unwrap_or("");
+            return format!("{}{args}", &rest[..j]);
+        }
+    }
+    name.replace("<Main>$", "Main")
+}
+
+/// .NET values without namespaces: `{System.Collections.Generic.Dictionary<string, int[]>}`
+/// becomes `{Dictionary<string, int[]>}`.
+fn short_value(value: &str) -> String {
+    if !value.starts_with("{System.") {
+        return value.to_string();
+    }
+    value.replace("System.Collections.Generic.", "").replace("System.Collections.", "").replace("System.", "")
 }
 
 pub fn parse_variables(body: &Value) -> Vec<Variable> {
@@ -114,8 +138,8 @@ pub fn parse_variables(body: &Value) -> Vec<Variable> {
                 .filter_map(|v| {
                     Some(Variable {
                         name: v["name"].as_str()?.to_string(),
-                        value: v["value"].as_str().unwrap_or_default().to_string(),
-                        type_name: v["type"].as_str().filter(|t| !t.is_empty()).map(str::to_string),
+                        value: short_value(v["value"].as_str().unwrap_or_default()),
+                        type_name: v["type"].as_str().filter(|t| !t.is_empty()).map(|t| if t.starts_with("System.") { short_value(&format!("{{{t}}}")).trim_matches(['{', '}']).to_string() } else { t.to_string() }),
                         reference: v["variablesReference"].as_i64().unwrap_or(0),
                     })
                 })
@@ -161,6 +185,16 @@ pub fn source_breakpoints<'a>(specs: impl IntoIterator<Item = &'a BreakpointSpec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dotnet_names() {
+        assert_eq!(frame_name("Program.<<Main>$>g__Greet|0_0(string name)"), "Greet(string name)");
+        assert_eq!(frame_name("Program.<Main>$()"), "Program.Main()");
+        assert_eq!(frame_name("main.rs::main"), "main.rs::main");
+        assert_eq!(short_value("{System.Collections.Generic.Dictionary<string, int[]>}"), "{Dictionary<string, int[]>}");
+        assert_eq!(short_value("{System.RuntimeType}"), "{RuntimeType}");
+        assert_eq!(short_value("\"System.\""), "\"System.\"");
+    }
 
     #[test]
     fn lua_loop_state_is_hidden() {

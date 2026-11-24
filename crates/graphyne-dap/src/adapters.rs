@@ -44,6 +44,78 @@ fn need(program: &'static str, lang: LanguageId) -> Result<PathBuf, String> {
     })
 }
 
+/// netcoredbg (Samsung, MIT): the .NET debugger Graphyne downloads on first use, and its SHA-256
+/// (as GitHub lists it).
+const NETCOREDBG_VERSION: &str = "3.2.0-1092";
+const NETCOREDBG_SHA256: &str = "3c410a45fa502415203a94fcb88654af65bf8e3dac158a5527a722e7a6b9274a";
+
+/// `netcoredbg.exe`: `GRAPHYNE_NETCOREDBG_PATH`, `netcoredbg` on PATH, else Graphyne's copy
+/// (about 3 MB, once).
+fn netcoredbg(progress: &dyn Fn(&str)) -> Result<PathBuf, String> {
+    if let Some(p) = std::env::var_os("GRAPHYNE_NETCOREDBG_PATH").filter(|p| !p.is_empty()).map(PathBuf::from) {
+        return if p.is_file() { Ok(p) } else { Err(format!("GRAPHYNE_NETCOREDBG_PATH: {} not found", p.display())) };
+    }
+    if let Some(p) = which("netcoredbg") {
+        return Ok(p);
+    }
+    let dir = graphyne_core::session::state_dir().ok_or("no folder for Graphyne's state")?.join("adapters").join(format!("netcoredbg-{NETCOREDBG_VERSION}"));
+    let exe = dir.join("netcoredbg").join("netcoredbg.exe");
+    if exe.is_file() {
+        return Ok(exe);
+    }
+    if !(cfg!(windows) && cfg!(target_arch = "x86_64")) {
+        return Err("Install netcoredbg (github.com/Samsung/netcoredbg) to debug C#".into());
+    }
+    progress(&format!("Downloading the .NET debugger (netcoredbg {NETCOREDBG_VERSION}, about 3 MB, once)…"));
+    let url = format!("https://github.com/Samsung/netcoredbg/releases/download/{NETCOREDBG_VERSION}/netcoredbg-win64.zip");
+    let staging = graphyne_core::download::fetch_unpacked(&url, NETCOREDBG_SHA256, &dir)
+        .map_err(|e| format!("Could not download the .NET debugger (netcoredbg {NETCOREDBG_VERSION}) from {url}: {e}. Check the connection"))?;
+    let moved = std::fs::rename(staging.join("netcoredbg"), dir.join("netcoredbg"));
+    let _ = std::fs::remove_dir_all(&staging);
+    moved.map_err(|e| format!("installing netcoredbg: {e}"))?;
+    if exe.is_file() { Ok(exe) } else { Err("the netcoredbg package has no netcoredbg.exe".into()) }
+}
+
+/// C# through netcoredbg: the project (or, .NET 10, the single file) is built with `dotnet
+/// build` first. netcoredbg runs the program itself; its output goes to the debug console.
+fn csharp(file: &Path, dir: &Path, title: &str, root: &Path, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
+    let dotnet = need("dotnet", LanguageId::CSharp)?;
+    let project = graphyne_core::run::find_project_file(file, root, "csproj");
+    let target = project.as_deref().unwrap_or(file);
+    let cwd = project.as_ref().and_then(|p| p.parent()).unwrap_or(dir).to_path_buf();
+    progress("Building with dotnet…");
+    let out = hidden_command(&dotnet.to_string_lossy())
+        .arg("build")
+        .arg(target)
+        // `-t:Build`: with -getProperty alone dotnet only evaluates the project.
+        .args(["-c", "Debug", "-nologo", "-t:Build", "-getProperty:TargetPath"])
+        .env("DOTNET_NOLOGO", "1")
+        .current_dir(&cwd)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("dotnet: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    if !out.status.success() {
+        let all = format!("{text}{}", String::from_utf8_lossy(&out.stderr));
+        let errors: Vec<&str> = all.lines().filter(|l| l.contains("error")).take(12).collect();
+        let shown = if errors.is_empty() { all.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n") } else { errors.join("\n") };
+        return Err(format!("dotnet build failed:\n{shown}"));
+    }
+    let dll = text.lines().map(str::trim).filter(|l| l.to_ascii_lowercase().ends_with(".dll") || l.to_ascii_lowercase().ends_with(".exe")).last().map(PathBuf::from);
+    let dll = dll.filter(|p| p.is_file()).ok_or_else(|| format!("dotnet build didn't say where the program is ({})", text.trim()))?;
+    let adapter = netcoredbg(progress)?;
+    Ok(Resolved {
+        name: "netcoredbg",
+        adapter_id: "coreclr",
+        program: adapter,
+        args: vec!["--interpreter=vscode".into()],
+        env: Vec::new(),
+        transport: Transport::Stdio,
+        cwd: cwd.clone(),
+        launch: json!({ "type": "coreclr", "request": "launch", "name": format!("Graphyne: {title}"), "program": dll, "args": [], "cwd": cwd, "stopAtEntry": false, "justMyCode": true }),
+    })
+}
+
 /// PHP through Xdebug, which Graphyne talks to itself (`bridge::dbgp`): Graphyne runs as the
 /// debug adapter, the script runs in a terminal tab with Xdebug loaded for this session.
 fn php(file: &Path, dir: &Path, title: &str, progress: &dyn Fn(&str)) -> Result<Resolved, String> {
@@ -151,6 +223,7 @@ pub fn resolve_with_progress(file: &Path, root: &Path, progress: &dyn Fn(&str)) 
         LanguageId::Lua => lua(file, &dir, &title, root, progress),
         LanguageId::Ruby => ruby(file, &dir, &title),
         LanguageId::Php => php(file, &dir, &title, progress),
+        LanguageId::CSharp => csharp(file, &dir, &title, root, progress),
         other => Err(format!("No debugger configured for {} yet", other.name())),
     }
 }

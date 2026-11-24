@@ -134,6 +134,12 @@ single portable `.exe`.
   console. If `dlv` isn't installed, Graphyne builds it once with `go install` (the Go toolchain
   checks the download) into its own folder. The debug build goes to the temp folder, not
   `__debug_bin` in the project.
+- **C#** via [netcoredbg](https://github.com/Samsung/netcoredbg) — tested with .NET 10: a project
+  (the nearest `.csproj`) or, with .NET 10, a single `.cs` file is built with `dotnet build`, then
+  breakpoints, stepping into methods, inline values, records, collections and C# expressions in
+  the console. Graphyne downloads netcoredbg (about 3 MB, checked against a pinned SHA-256) on the
+  first C# debug session. The program's output appears in the debug console (netcoredbg can't run
+  it in a terminal tab, so it can't read input while debugged). Run uses `dotnet run` the same way.
 - **Ruby** via Ruby's own debugger (the `debug` gem, part of Ruby since 3.1) — tested with Ruby 4.0:
   breakpoints, stepping into methods, inline values, structs and hashes, and Ruby expressions in
   the console (`items.keys`). The program runs in a terminal tab, so it can read input.

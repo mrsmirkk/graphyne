@@ -50,6 +50,26 @@ pub fn find_up(start: &Path, root: &Path, marker: &str) -> Option<PathBuf> {
     None
 }
 
+/// The nearest project file with extension `ext` (`csproj`) in the folders from `start` up to
+/// `root`.
+pub fn find_project_file(start: &Path, root: &Path, ext: &str) -> Option<PathBuf> {
+    let mut dir = if start.is_dir() { Some(start) } else { start.parent() };
+    while let Some(d) = dir {
+        if let Ok(entries) = std::fs::read_dir(d) {
+            let mut found: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case(ext))).collect();
+            found.sort();
+            if let Some(p) = found.into_iter().next() {
+                return Some(p);
+            }
+        }
+        if d == root {
+            break;
+        }
+        dir = d.parent();
+    }
+    None
+}
+
 /// Build the plan for running `file` inside `project_root`.
 pub fn plan(file: &Path, project_root: &Path, shell: ShellKind) -> RunPlan {
     let lang = LanguageId::from_path(file);
@@ -89,7 +109,14 @@ pub fn plan(file: &Path, project_root: &Path, shell: ShellKind) -> RunPlan {
         LanguageId::TypeScript if crate::toolchain::typescript_runner() == "node" => pty(&name, dir, format!("node {f}")),
         LanguageId::TypeScript | LanguageId::Tsx => pty(&name, dir, format!("bun run {f}")),
         LanguageId::JavaScript => pty(&name, dir, format!("node {f}")),
-        LanguageId::CSharp => pty("dotnet run", dir, "dotnet run".into()),
+        // A project, else the file alone (.NET 10 runs a single .cs file).
+        LanguageId::CSharp => match find_project_file(file, project_root, "csproj") {
+            Some(proj) => {
+                let cwd = proj.parent().map(Path::to_path_buf).unwrap_or(dir);
+                pty("dotnet run", cwd, format!("dotnet run --project {}", quote(shell, &proj)))
+            }
+            None => pty(&name, dir, format!("dotnet run {f}")),
+        },
         LanguageId::Java => pty(&name, dir, format!("java {f}")),
         LanguageId::Kotlin => {
             let jar = match shell {
@@ -163,6 +190,23 @@ pub fn pty_line(shell: ShellKind, cwd: &Path, command: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn csharp_plans() {
+        let tmp = std::env::temp_dir().join(format!("graphyne-cs-{}", std::process::id()));
+        let app = tmp.join("App");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(tmp.join("script.cs"), "").unwrap();
+        std::fs::write(app.join("Program.cs"), "").unwrap();
+        std::fs::write(app.join("App.csproj"), "").unwrap();
+        let cmd = |file: &Path| match plan(file, &tmp, ShellKind::PowerShell) {
+            RunPlan::Pty { command, .. } => command,
+            other => panic!("{other:?}"),
+        };
+        assert!(cmd(&app.join("Program.cs")).starts_with("dotnet run --project ") && cmd(&app.join("Program.cs")).ends_with("App.csproj'"));
+        assert!(cmd(&tmp.join("script.cs")).starts_with("dotnet run '"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn python_plan_uses_the_project_venv() {
         let root = std::env::temp_dir().join(format!("graphyne-run-venv-{}", std::process::id()));
