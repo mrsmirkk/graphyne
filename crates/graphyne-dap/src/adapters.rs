@@ -44,6 +44,27 @@ fn need(program: &'static str, lang: LanguageId) -> Result<PathBuf, String> {
     })
 }
 
+/// Dart through the SDK's own debug adapter (`dart debug_adapter`). The program runs in a
+/// terminal tab (`console: terminal` → runInTerminal), from its package folder.
+fn dart(file: &Path, dir: &Path, title: &str, root: &Path) -> Result<Resolved, String> {
+    let dart = need("dart", LanguageId::Dart)?;
+    let cwd = graphyne_core::run::find_up(file, root, "pubspec.yaml").unwrap_or_else(|| dir.to_path_buf());
+    Ok(Resolved {
+        name: "dart",
+        adapter_id: "dart",
+        program: dart,
+        args: vec!["debug_adapter".into()],
+        env: Vec::new(),
+        transport: Transport::Stdio,
+        cwd: cwd.clone(),
+        launch: json!({
+            "type": "dart", "request": "launch", "name": format!("Graphyne: {title}"),
+            "program": file, "cwd": cwd, "console": "terminal",
+            "debugSdkLibraries": false, "debugExternalPackageLibraries": false, "evaluateGettersInDebugViews": true,
+        }),
+    })
+}
+
 /// netcoredbg (Samsung, MIT): the .NET debugger Graphyne downloads on first use, and its SHA-256
 /// (as GitHub lists it).
 const NETCOREDBG_VERSION: &str = "3.2.0-1092";
@@ -224,6 +245,7 @@ pub fn resolve_with_progress(file: &Path, root: &Path, progress: &dyn Fn(&str)) 
         LanguageId::Ruby => ruby(file, &dir, &title),
         LanguageId::Php => php(file, &dir, &title, progress),
         LanguageId::CSharp => csharp(file, &dir, &title, root, progress),
+        LanguageId::Dart => dart(file, &dir, &title, root),
         other => Err(format!("No debugger configured for {} yet", other.name())),
     }
 }

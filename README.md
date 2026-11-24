@@ -134,6 +134,10 @@ single portable `.exe`.
   console. If `dlv` isn't installed, Graphyne builds it once with `go install` (the Go toolchain
   checks the download) into its own folder. The debug build goes to the temp folder, not
   `__debug_bin` in the project.
+- **Dart** via the Dart SDK's own debugger (`dart debug_adapter`) — tested with Dart 3.14:
+  breakpoints, stepping into functions, inline values, objects and maps, Dart expressions in the
+  console. The program runs in a terminal tab, so it can read input. The SDK's language server
+  (`dart language-server`) gives completion, hover and inlay hints with nothing else to install.
 - **C#** via [netcoredbg](https://github.com/Samsung/netcoredbg) — tested with .NET 10: a project
   (the nearest `.csproj`) or, with .NET 10, a single `.cs` file is built with `dotnet build`, then
   breakpoints, stepping into methods, inline values, records, collections and C# expressions in

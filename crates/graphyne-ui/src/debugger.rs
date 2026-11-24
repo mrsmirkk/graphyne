@@ -81,6 +81,9 @@ pub struct Session {
     pub children: HashMap<i64, Vec<Variable>>,
     pub expanded: HashSet<i64>,
     pub console: Vec<(SharedString, String)>,
+    /// Counts stops: a stack asked for at an earlier stop is dropped when it arrives late
+    /// (Dart stops at the isolate's start, then at the breakpoint, in quick succession).
+    stops: u64,
     _tasks: Vec<Task<()>>,
 }
 
@@ -198,7 +201,8 @@ impl Debugger {
             let loaded = cx
                 .background_spawn(async move {
                     let text = std::fs::read_to_string(root.join(STATE_DIR).join(BREAKPOINTS_FILE)).ok()?;
-                    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+                    // A byte-order mark (the file edited by hand) is not JSON.
+                    let v: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
                     let list = v["breakpoints"].as_array()?;
                     Some(
                         list.iter()
@@ -346,6 +350,7 @@ impl Debugger {
             threads: Vec::new(),
             frames: Vec::new(),
             selected_frame: 0,
+            stops: 0,
             scopes: Vec::new(),
             children: HashMap::new(),
             expanded: HashSet::new(),
@@ -461,6 +466,7 @@ impl Debugger {
                 if let Some(s) = self.session.as_mut() {
                     s.status = Status::Paused { reason, description };
                     s.thread_id = thread_id.or(s.thread_id);
+                    s.stops += 1;
                 }
                 self.load_stack(cx);
             }
@@ -582,11 +588,15 @@ impl Debugger {
         let Some(s) = self.session.as_ref() else { return };
         let Some(client) = s.client.clone() else { return };
         let thread_id = s.thread_id;
+        let stop = s.stops;
         cx.spawn(async move |this, cx| {
             let threads = client.request("threads", json!({})).await.map(|b| model::parse_threads(&b)).unwrap_or_default();
             let tid = thread_id.or_else(|| threads.first().map(|t| t.id)).unwrap_or(1);
             let frames = client.request("stackTrace", json!({ "threadId": tid, "startFrame": 0, "levels": 64 })).await.map(|b| model::parse_stack(&b)).unwrap_or_default();
             this.update(cx, |d, cx| {
+                if d.session.as_ref().is_some_and(|s| s.stops != stop) {
+                    return; // the program has stopped again since
+                }
                 if let Some(s) = d.session.as_mut() {
                     s.threads = threads;
                     s.thread_id = Some(tid);

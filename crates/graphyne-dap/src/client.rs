@@ -149,6 +149,31 @@ fn parse_event(msg: &Value) -> Option<DapEvent> {
     })
 }
 
+/// A failed response's message: `body.error.format` with its `{name}`s filled from
+/// `body.error.variables` (Dart sends `"{message}"`), else `message`.
+fn error_text(msg: &Value) -> String {
+    let error = &msg["body"]["error"];
+    match error["format"].as_str() {
+        Some(format) => {
+            let mut text = format.to_string();
+            if let Some(vars) = error["variables"].as_object() {
+                for (name, value) in vars {
+                    let value = value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string());
+                    text = text.replace(&format!("{{{name}}}"), &value);
+                }
+            }
+            text
+        }
+        None => msg["message"].as_str().unwrap_or("request failed").to_string(),
+    }
+}
+
+/// `GRAPHYNE_DAP_TRACE`: every message both ways on stderr (diagnosing an adapter).
+fn trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("GRAPHYNE_DAP_TRACE").is_some())
+}
+
 fn connect_tcp(port: u16, wait: Duration) -> Result<std::net::TcpStream> {
     let deadline = Instant::now() + wait;
     loop {
@@ -167,8 +192,12 @@ fn open_conn(shared: &Arc<Shared>, reader: Box<dyn Read + Send>, mut writer: Box
     let conn = Conn { tx, pending: Arc::default(), seq: Arc::new(AtomicI64::new(1)) };
     let label = if child { format!("{}-child", shared.name) } else { shared.name.clone() };
     std::thread::Builder::new().name(format!("dap-{label}-write")).spawn(move || {
+        let trace = trace_enabled();
         for msg in out_rx.iter() {
             let Ok(body) = serde_json::to_string(&msg) else { continue };
+            if trace {
+                eprintln!("dap -> {body}");
+            }
             if write!(writer, "Content-Length: {}\r\n\r\n{}", body.len(), body).and_then(|_| writer.flush()).is_err() {
                 break;
             }
@@ -179,7 +208,12 @@ fn open_conn(shared: &Arc<Shared>, reader: Box<dyn Read + Send>, mut writer: Box
         let mut reader = BufReader::new(reader);
         loop {
             let msg = match read_message(&mut reader) {
-                Ok(Some(m)) => m,
+                Ok(Some(m)) => {
+                    if trace_enabled() {
+                        eprintln!("dap <- {m}");
+                    }
+                    m
+                }
                 Ok(None) => break,
                 Err(e) => {
                     log::warn!("[dap {label}] protocol error: {e:#}");
@@ -193,8 +227,7 @@ fn open_conn(shared: &Arc<Shared>, reader: Box<dyn Read + Send>, mut writer: Box
                         let result = if msg["success"].as_bool().unwrap_or(false) {
                             Ok(msg.get("body").cloned().unwrap_or(Value::Null))
                         } else {
-                            let detail = msg["body"]["error"]["format"].as_str().or_else(|| msg["message"].as_str()).unwrap_or("request failed");
-                            Err(detail.to_string())
+                            Err(error_text(&msg))
                         };
                         let _ = waiter.send(result);
                     }
@@ -417,5 +450,18 @@ impl DapClient {
 impl Drop for DapClient {
     fn drop(&mut self) {
         self.kill();
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn error_messages() {
+        let dart = serde_json::json!({ "success": false, "body": { "error": { "format": "{message}", "variables": { "message": "Undefined name 'point'." } } } });
+        assert_eq!(error_text(&dart), "Undefined name 'point'.");
+        let plain = serde_json::json!({ "success": false, "message": "not available" });
+        assert_eq!(error_text(&plain), "not available");
     }
 }
