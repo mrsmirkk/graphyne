@@ -143,6 +143,10 @@ single portable `.exe`.
 - **Kotlin** with the same JVM debugger — tested with Kotlin 2.4: the file is compiled with
   `kotlinc` (with Kotlin's runtime) and debugged like Java; data classes, Kotlin collections and
   properties (`point.x`, `items.size`) in the console.
+- **Scala** with the same JVM debugger — tested with Scala 3.10 (scala-cli 1.19): scala-cli
+  compiles the file and gives the command that runs it; case classes, Scala collections, variables
+  a lambda changes (`total`, not `total$1` in an `IntRef`) and readable frames (`Main.run
+  (lambda)`).
 - **Dart** via the Dart SDK's own debugger (`dart debug_adapter`) — tested with Dart 3.14:
   breakpoints, stepping into functions, inline values, objects and maps, Dart expressions in the
   console. The program runs in a terminal tab, so it can read input. The SDK's language server

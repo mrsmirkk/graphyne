@@ -678,7 +678,9 @@ impl Session {
         let data = self.w().object(thread).frame(frame).done();
         if let Ok(d) = self.call(cmd::SF_THIS_OBJECT, data) {
             if let Ok(v) = Reader::new(&d, self.ids).value() {
-                if v.object_id().is_some() {
+                // Not the holder of Scala's top-level definitions (`Main$package$`): it has nothing to show.
+                let holder = v.object_id().and_then(|id| self.type_of(id)).map(|c| self.signature(c)).is_some_and(|s| s.ends_with("$package$;"));
+                if v.object_id().is_some() && !holder {
                     out.push(("this".to_string(), v, String::new()));
                 }
             }
@@ -688,8 +690,8 @@ impl Session {
         };
         let mut visible: Vec<Local> = Vec::new();
         for l in table.into_iter().filter(|l| l.code_index <= loc.index && loc.index < l.code_index + l.length) {
-            // Compiler-made locals (`$i$a$…`, `$this$…`) aren't the program's.
-            if l.name.starts_with('$') || l.name.is_empty() {
+            // Compiler-made locals (`$i$a$…`, `$this$…`) aren't the program's; `this` is above.
+            if l.name.starts_with('$') || l.name.is_empty() || l.name == "this" {
                 continue;
             }
             visible.retain(|v| v.name != l.name);
@@ -708,9 +710,30 @@ impl Session {
         let n = r.i32().unwrap_or(0) as usize;
         for l in visible.into_iter().take(n) {
             let Ok(v) = r.value() else { break };
-            out.push((l.name, v, l.signature));
+            // A variable a lambda changes is boxed (Scala's IntRef, Kotlin's Ref.IntRef): its
+            // value, under its own name (`total`, not `total$1`).
+            let name = source_name(&l.name);
+            match self.unbox_ref(&v) {
+                Some((inner, sig)) => out.push((name, inner, sig)),
+                None => out.push((name, v, l.signature)),
+            }
         }
         Ok(out)
+    }
+
+    /// The value inside a compiler's box for a captured variable.
+    fn unbox_ref(&mut self, v: &Value) -> Option<(Value, String)> {
+        let id = v.object_id()?;
+        let class = self.type_of(id)?;
+        let sig = self.signature(class);
+        let field = if sig.starts_with("Lscala/runtime/") && sig.ends_with("Ref;") {
+            "elem"
+        } else if sig.starts_with("Lkotlin/jvm/internal/Ref$") {
+            "element"
+        } else {
+            return None;
+        };
+        self.fields(id).into_iter().find(|(n, _, _)| n == field).map(|(_, v, s)| (v, s))
     }
 
     /// Instance fields of an object (this class and the ones above it).
@@ -1225,8 +1248,7 @@ impl Session {
             if i > 0 && line == 0 {
                 continue;
             }
-            let class_name = jdwp::type_name(&sig);
-            let mut frame = json!({ "id": i + 1, "name": format!("{}.{method}", jdwp::simple_name(&class_name)), "line": line, "column": 1 });
+            let mut frame = json!({ "id": i + 1, "name": frame_name(&jdwp::type_name(&sig), &method), "line": line, "column": 1 });
             let path = match self.classes.get(&loc.class).and_then(|c| c.path.clone()) {
                 Some(p) => Some(p),
                 None => {
@@ -1283,6 +1305,35 @@ impl Session {
         self.step = Reader::new(&d, self.ids).i32().ok();
         self.resume_vm();
         Ok(())
+    }
+}
+
+/// A frame as the source names it: `Main.run (lambda)` for Scala's `Main$package.run$$anonfun$1`,
+/// javac's `lambda$main$0` and Kotlin's `main$lambda$0`; `Main` for Scala's top-level
+/// `Main$package` and object `Main$`.
+fn frame_name(class: &str, method: &str) -> String {
+    let short = class.rsplit('.').next().unwrap_or(class);
+    let short = short.trim_end_matches('$');
+    let short = short.strip_suffix("$package").unwrap_or(short);
+    let short = jdwp::simple_name(short);
+    let lambda = if let Some(rest) = method.strip_prefix("lambda$") {
+        rest.split('$').next().map(str::to_string)
+    } else if let Some((outer, _)) = method.split_once("$$anonfun$") {
+        Some(outer.to_string())
+    } else {
+        method.split_once("$lambda$").map(|(outer, _)| outer.to_string())
+    };
+    match lambda {
+        Some(outer) => format!("{short}.{outer} (lambda)"),
+        None => format!("{short}.{method}"),
+    }
+}
+
+/// A local's name as written: Scala adds `$1` to variables a lambda captures.
+fn source_name(name: &str) -> String {
+    match name.rsplit_once('$') {
+        Some((base, n)) if !base.is_empty() && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => base.to_string(),
+        _ => name.to_string(),
     }
 }
 
@@ -1506,5 +1557,12 @@ mod tests {
         assert_eq!(parse("args[0] + \"!\""), r#"Bin("+", Index(Name("args"), Int(0)), Str("!"))"#);
         assert!(tokenize("a ? b : c").is_err());
         assert!(library_class("Ljava/util/ArrayList;") && library_class("Lkotlin/collections/CollectionsKt;") && !library_class("Lcom/demo/Main;"));
+        assert_eq!(frame_name("Main$package", "run$$anonfun$1"), "Main.run (lambda)");
+        assert_eq!(frame_name("Main$package$", "greet"), "Main.greet");
+        assert_eq!(frame_name("demo.Main", "lambda$main$0"), "Main.main (lambda)");
+        assert_eq!(frame_name("MainKt", "main$lambda$0"), "MainKt.main (lambda)");
+        assert_eq!(frame_name("Greeter$", "greet"), "Greeter.greet");
+        assert_eq!(frame_name("demo.Main", "main"), "Main.main");
+        assert_eq!((source_name("total$1"), source_name("total"), source_name("$this")), ("total".to_string(), "total".to_string(), "$this".to_string()));
     }
 }
